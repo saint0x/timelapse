@@ -1,0 +1,32 @@
+[package]
+name = "seer-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core hashing and storage
+blake3 = { workspace = true }
+memmap2 = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+# Data structures
+smallvec = { workspace = true }
+ahash = { workspace = true }
+bytes = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+bincode = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Compression
+zstd = { workspace = true }

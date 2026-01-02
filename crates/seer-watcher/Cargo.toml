@@ -1,0 +1,22 @@
+[package]
+name = "seer-watcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# File watching
+notify = { workspace = true }
+
+# Core dependency
+seer-core = { path = "../seer-core" }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Concurrency
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }

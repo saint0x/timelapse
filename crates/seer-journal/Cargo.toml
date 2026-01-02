@@ -1,0 +1,23 @@
+[package]
+name = "seer-journal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Embedded database
+sled = { workspace = true }
+
+# Core dependency
+seer-core = { path = "../seer-core" }
+
+# Utilities
+ulid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }

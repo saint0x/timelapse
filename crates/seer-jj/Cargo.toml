@@ -1,0 +1,19 @@
+[package]
+name = "seer-jj"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# JJ integration
+jj-lib = { workspace = true }
+
+# Core dependencies
+seer-core = { path = "../seer-core" }
+seer-journal = { path = "../seer-journal" }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }

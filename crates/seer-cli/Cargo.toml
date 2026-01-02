@@ -1,0 +1,34 @@
+[package]
+name = "seer-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "snap"
+path = "src/main.rs"
+
+[dependencies]
+# All seer crates
+seer-core = { path = "../seer-core" }
+seer-watcher = { path = "../seer-watcher" }
+seer-journal = { path = "../seer-journal" }
+seer-jj = { path = "../seer-jj" }
+
+# CLI
+clap = { workspace = true }
+indicatif = { workspace = true }
+owo-colors = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["macros"] }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
