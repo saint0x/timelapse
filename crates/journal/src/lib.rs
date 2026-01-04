@@ -16,7 +16,7 @@ pub mod recovery;
 
 // Re-exports
 pub use checkpoint::{Checkpoint, CheckpointMeta, CheckpointReason};
-pub use journal::Journal;
+pub use journal::{Journal, IntegrityReport, RepairResult};
 pub use pathmap::PathMap;
 pub use incremental::incremental_update;
 pub use retention::{GarbageCollector, GcMetrics, PinManager, RetentionPolicy};

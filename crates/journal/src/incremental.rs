@@ -150,14 +150,8 @@ fn reconcile_file(
         0o644
     };
 
-    // Hash the file
-    let blob_hash = if metadata.len() > 4 * 1024 * 1024 {
-        // Use memory-mapped hashing for files > 4MB
-        hash::hash_file_mmap(abs_path)?
-    } else {
-        // Use regular file hashing
-        hash::hash_file(abs_path)?
-    };
+    // Hash the file with stability verification (double-stat pattern)
+    let blob_hash = hash::hash_file_stable(abs_path, 3)?;
 
     // Check if we already have this blob
     if !store.blob_store().has_blob(blob_hash) {

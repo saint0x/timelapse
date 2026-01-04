@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+tracing = { workspace = true }
 
 # Concurrency
 crossbeam-channel = { workspace = true }
@@ -30,3 +31,4 @@ dashmap = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+filetime = "0.2"

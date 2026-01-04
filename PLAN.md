@@ -1,6 +1,30 @@
-Cool — let’s nail it down cleanly, but I’m going to be strict about one thing:
+# ARCHIVE: Design Conversation Transcript
 
-“Store diffs” is a UX description, not a storage primitive.
+**⚠️ IMPORTANT: This is a historical design discussion from the planning phase.**
+
+**Status:** ARCHIVED - Preserved for architectural context only
+
+**For Current Implementation Status, See:**
+- `STATUS.md` - Detailed phase-by-phase progress (90% complete, Phase 7 pending)
+- `README.md` - User-facing documentation and architecture
+- `plan-ascending/0-INDEX.md` - Implementation roadmap index
+- `plan-ascending/7.md` - Phase 7: Production Hardening & Git Compatibility
+- Git commits - Ground truth for what's actually implemented
+
+**Purpose of This Document:**
+This document captures the original design conversation and architectural decisions.
+It contains brainstorming, alternative approaches considered, and design rationale.
+Some information may be outdated as implementation evolved.
+
+**Last Updated:** 2025-12-XX (archived 2026-01-04)
+
+---
+
+# Original Design Discussion
+
+Cool — let's nail it down cleanly, but I'm going to be strict about one thing:
+
+"Store diffs" is a UX description, not a storage primitive.
 If you literally store text diffs as your source of truth, you will get bitten (binary files, rename dances, partial writes, newline normalization, mode bits, conflict states, etc.). The correct way is:
 	•	Store snapshots as content-addressed file versions (blobs) + trees
 	•	Compute diffs on demand (or cache them for UI)

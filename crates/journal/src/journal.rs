@@ -150,6 +150,275 @@ impl Journal {
     pub fn count(&self) -> usize {
         self.index.read().len()
     }
+
+    /// Verify journal integrity
+    ///
+    /// Scans all entries in the journal database and checks:
+    /// 1. Entries deserialize correctly
+    /// 2. Index consistency with database
+    /// 3. No orphaned database entries
+    pub fn verify_integrity(&self) -> Result<IntegrityReport> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut report = IntegrityReport::default();
+
+        tracing::info!("Starting journal integrity check...");
+
+        // Scan all database entries
+        for result in self.db.iter() {
+            match result {
+                Ok((key, value)) => {
+                    report.total_entries += 1;
+
+                    // Parse sequence number
+                    let seq = match key.as_ref().try_into() {
+                        Ok(bytes) => u64::from_le_bytes(bytes),
+                        Err(e) => {
+                            tracing::warn!("Invalid key length: {}", e);
+                            report.corrupted_entries.push(key.to_vec());
+                            continue;
+                        }
+                    };
+
+                    // Try to deserialize checkpoint
+                    match Checkpoint::deserialize(&value) {
+                        Ok(checkpoint) => {
+                            // Check index consistency
+                            let index = self.index.read();
+                            if let Some(&indexed_seq) = index.get(&checkpoint.id) {
+                                if indexed_seq != seq {
+                                    tracing::warn!(
+                                        "Index mismatch: checkpoint {} has seq {} in index but {} in db",
+                                        checkpoint.id, indexed_seq, seq
+                                    );
+                                    report.index_mismatches.push((checkpoint.id, seq, indexed_seq));
+                                }
+                            } else {
+                                tracing::warn!("Checkpoint {} (seq {}) not in index", checkpoint.id, seq);
+                                report.orphaned_entries.push((seq, checkpoint.id));
+                            }
+                            drop(index);
+
+                            report.valid_entries += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize checkpoint at seq {}: {}", seq, e);
+                            report.corrupted_entries.push(key.to_vec());
+                        }
+                    }
+                }
+                Err(e) => {
+                    report.db_errors.push(e.to_string());
+                }
+            }
+        }
+
+        // Check for index entries without database entries
+        let index = self.index.read();
+        for (&id, &seq) in index.iter() {
+            let key = seq.to_le_bytes();
+            if self.db.get(&key)?.is_none() {
+                tracing::warn!("Index references non-existent entry: {} -> {}", id, seq);
+                report.index_without_db.push((id, seq));
+            }
+        }
+        drop(index);
+
+        report.scan_duration = start.elapsed();
+        tracing::info!(
+            "Journal integrity check complete: {}/{} valid entries",
+            report.valid_entries,
+            report.total_entries
+        );
+
+        Ok(report)
+    }
+
+    /// Repair journal by removing corrupted entries and rebuilding index
+    pub fn repair(&self, dry_run: bool) -> Result<RepairResult> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut result = RepairResult::default();
+
+        tracing::info!("Starting journal repair (dry_run: {})...", dry_run);
+
+        // First, run integrity check
+        let report = self.verify_integrity()?;
+        result.initial_report = Some(report.clone());
+
+        if report.is_healthy() {
+            tracing::info!("Journal is healthy, no repair needed");
+            return Ok(result);
+        }
+
+        // Remove corrupted entries
+        if !dry_run {
+            for key in &report.corrupted_entries {
+                self.db.remove(key)?;
+                result.removed_corrupted += 1;
+            }
+        } else {
+            result.removed_corrupted = report.corrupted_entries.len();
+        }
+
+        // Rebuild index from valid database entries
+        if !dry_run && (!report.orphaned_entries.is_empty() || !report.index_without_db.is_empty()) {
+            let mut new_index = BTreeMap::new();
+            let mut max_seq = 0u64;
+
+            for item in self.db.iter() {
+                let (key, value) = item?;
+                let seq = u64::from_le_bytes(key.as_ref().try_into()?);
+
+                if let Ok(checkpoint) = Checkpoint::deserialize(&value) {
+                    new_index.insert(checkpoint.id, seq);
+                    max_seq = max_seq.max(seq);
+                }
+            }
+
+            // Update index
+            *self.index.write() = new_index;
+            self.seq_counter.store(max_seq + 1, Ordering::SeqCst);
+            result.index_rebuilt = true;
+        }
+
+        // Flush database
+        if !dry_run {
+            self.db.flush()?;
+        }
+
+        result.repair_duration = start.elapsed();
+
+        // Re-verify
+        if !dry_run {
+            result.final_report = Some(self.verify_integrity()?);
+        }
+
+        tracing::info!("Journal repair complete");
+
+        Ok(result)
+    }
+
+    /// Get direct access to the database (for advanced operations)
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+}
+
+/// Journal integrity report
+#[derive(Debug, Default, Clone)]
+pub struct IntegrityReport {
+    /// Total entries scanned
+    pub total_entries: usize,
+
+    /// Valid entries
+    pub valid_entries: usize,
+
+    /// Corrupted entries (failed deserialization)
+    pub corrupted_entries: Vec<Vec<u8>>,
+
+    /// Orphaned entries (in DB but not in index)
+    pub orphaned_entries: Vec<(u64, Ulid)>,
+
+    /// Index mismatches (index seq != DB seq)
+    pub index_mismatches: Vec<(Ulid, u64, u64)>,
+
+    /// Index entries without database entries
+    pub index_without_db: Vec<(Ulid, u64)>,
+
+    /// Database errors
+    pub db_errors: Vec<String>,
+
+    /// Scan duration
+    pub scan_duration: std::time::Duration,
+}
+
+impl IntegrityReport {
+    pub fn is_healthy(&self) -> bool {
+        self.corrupted_entries.is_empty()
+            && self.orphaned_entries.is_empty()
+            && self.index_mismatches.is_empty()
+            && self.index_without_db.is_empty()
+            && self.db_errors.is_empty()
+    }
+
+    pub fn print_summary(&self) {
+        use owo_colors::OwoColorize;
+
+        println!("Journal Integrity Report");
+        println!("========================");
+        println!("Total entries: {}", self.total_entries);
+        println!("Valid entries: {}", self.valid_entries);
+        println!("Corrupted entries: {}", self.corrupted_entries.len());
+        println!("Orphaned entries: {}", self.orphaned_entries.len());
+        println!("Index mismatches: {}", self.index_mismatches.len());
+        println!("Index without DB: {}", self.index_without_db.len());
+        println!("Database errors: {}", self.db_errors.len());
+        println!("Scan duration: {:?}", self.scan_duration);
+        println!();
+
+        if self.is_healthy() {
+            println!("{}", "✅ Journal is healthy".green().bold());
+        } else {
+            println!("{}", "⚠️  Journal has issues - run repair to fix".yellow().bold());
+        }
+    }
+}
+
+/// Journal repair result
+#[derive(Debug, Default)]
+pub struct RepairResult {
+    /// Initial integrity report
+    pub initial_report: Option<IntegrityReport>,
+
+    /// Final integrity report (after repair)
+    pub final_report: Option<IntegrityReport>,
+
+    /// Number of corrupted entries removed
+    pub removed_corrupted: usize,
+
+    /// Whether index was rebuilt
+    pub index_rebuilt: bool,
+
+    /// Repair duration
+    pub repair_duration: std::time::Duration,
+}
+
+impl RepairResult {
+    pub fn print_summary(&self) {
+        use owo_colors::OwoColorize;
+
+        println!("Journal Repair Result");
+        println!("====================");
+
+        if let Some(ref initial) = self.initial_report {
+            println!("\nInitial State:");
+            println!("  Total entries: {}", initial.total_entries);
+            println!("  Issues found: {}",
+                initial.corrupted_entries.len() +
+                initial.orphaned_entries.len() +
+                initial.index_mismatches.len() +
+                initial.index_without_db.len()
+            );
+        }
+
+        println!("\nActions Taken:");
+        println!("  Corrupted entries removed: {}", self.removed_corrupted);
+        println!("  Index rebuilt: {}", if self.index_rebuilt { "Yes" } else { "No" });
+        println!("  Repair duration: {:?}", self.repair_duration);
+
+        if let Some(ref final_report) = self.final_report {
+            println!("\nFinal State:");
+            if final_report.is_healthy() {
+                println!("  {}", "✅ Journal is now healthy".green().bold());
+            } else {
+                println!("  {}", "⚠️  Some issues remain".yellow().bold());
+                final_report.print_summary();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

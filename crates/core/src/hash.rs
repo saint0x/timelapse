@@ -1,7 +1,9 @@
 //! BLAKE3 hashing primitives for content-addressed storage
 
 use std::path::Path;
-use anyhow::Result;
+use std::time::Duration;
+use std::thread::sleep;
+use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
 
 /// A BLAKE3 hash (32 bytes)
@@ -105,6 +107,64 @@ pub fn hash_file_mmap(path: &Path) -> Result<Blake3Hash> {
     let mmap = unsafe { Mmap::map(&file)? };
     let hash = blake3::hash(&mmap);
     Ok(Blake3Hash::from_bytes(*hash.as_bytes()))
+}
+
+/// Hash file with stability verification (double-stat pattern)
+///
+/// Ensures file is not changing during read by checking metadata
+/// before and after read operation.
+///
+/// # Arguments
+/// * `path` - File to hash
+/// * `max_retries` - Maximum retry attempts (default: 3)
+///
+/// # Returns
+/// * `Ok(hash)` - File is stable, hash is valid
+/// * `Err(HashError::UnstableFile)` - File changed too many times during read
+/// * `Err(...)` - Other I/O errors
+///
+/// # Example
+/// ```no_run
+/// use core::hash::hash_file_stable;
+/// use std::path::Path;
+///
+/// let hash = hash_file_stable(Path::new("file.txt"), 3)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn hash_file_stable(path: &Path, max_retries: u8) -> Result<Blake3Hash> {
+    use std::fs;
+
+    for attempt in 0..max_retries {
+        // 1. Stat before read
+        let stat1 = fs::metadata(path)
+            .with_context(|| format!("Failed to stat (pre): {}", path.display()))?;
+
+        // 2. Hash file (existing implementation)
+        let hash = hash_file(path)?;
+
+        // 3. Stat after read
+        let stat2 = fs::metadata(path)
+            .with_context(|| format!("Failed to stat (post): {}", path.display()))?;
+
+        // 4. Verify stability (size + mtime unchanged)
+        if stat1.len() == stat2.len() &&
+           stat1.modified()? == stat2.modified()? {
+            return Ok(hash);
+        }
+
+        // File changed during read - exponential backoff
+        if attempt < max_retries - 1 {
+            let backoff_ms = 50 << attempt;  // 50ms, 100ms, 200ms
+            sleep(Duration::from_millis(backoff_ms));
+        }
+    }
+
+    // Failed after all retries
+    Err(anyhow::anyhow!(
+        "File {} is unstable after {} read attempts (file changing too rapidly)",
+        path.display(),
+        max_retries
+    ))
 }
 
 /// Incremental hasher for building hashes across multiple chunks
@@ -264,5 +324,111 @@ mod tests {
         let hash1 = hash_bytes(b"hello");
         let hash2 = hash_bytes(b"world");
         assert_ne!(hash1, hash2);
+    }
+
+    // Double-stat verification tests
+
+    #[test]
+    fn test_stable_file_succeeds() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let file = temp_dir.path().join("stable.txt");
+        std::fs::write(&file, b"stable content")?;
+
+        // Stable file should hash successfully
+        let hash = hash_file_stable(&file, 3)?;
+        assert_eq!(hash, hash_bytes(b"stable content"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_unstable_file_retries_then_fails() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir()?;
+        let file = temp_dir.path().join("unstable.txt");
+        std::fs::write(&file, b"initial")?;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = stop_flag.clone();
+        let file_clone = file.clone();
+
+        // Spawn writer thread that constantly changes file VERY rapidly
+        let writer = thread::spawn(move || {
+            let mut counter = 0u64;
+            while !stop_flag_clone.load(Ordering::Relaxed) {
+                let _ = std::fs::write(&file_clone, format!("changing {}", counter));
+                counter += 1;
+                // No sleep - write as fast as possible
+            }
+        });
+
+        // Give writer time to start
+        thread::sleep(Duration::from_millis(50));
+
+        // Should retry and eventually fail (only 2 retries to make test faster)
+        let result = hash_file_stable(&file, 2);
+
+        // Stop writer
+        stop_flag.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+
+        // Should fail with unstable file error
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unstable"), "Error message should mention 'unstable': {}", err_msg);
+        Ok(())
+    }
+
+    #[test]
+    fn test_eventually_stable_file_succeeds() -> Result<()> {
+        use std::thread;
+        use std::time::Instant;
+
+        let temp_dir = tempfile::tempdir()?;
+        let file = temp_dir.path().join("eventually.txt");
+        std::fs::write(&file, b"initial")?;
+
+        let file_clone = file.clone();
+
+        // Write for 200ms then stop
+        let writer = thread::spawn(move || {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                let _ = std::fs::write(&file_clone, b"changing...");
+                thread::sleep(Duration::from_millis(20));
+            }
+            // Final stable write
+            std::fs::write(&file_clone, b"stable now").unwrap();
+        });
+
+        // Start after some changes
+        thread::sleep(Duration::from_millis(100));
+
+        // Should eventually succeed (with retries)
+        let result = hash_file_stable(&file, 10);  // Allow more retries
+
+        writer.join().unwrap();
+
+        // Should succeed
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_stable_hash_matches_regular_hash() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let file = temp_dir.path().join("test.txt");
+        let data = b"test data for comparison";
+        std::fs::write(&file, data)?;
+
+        let hash_stable = hash_file_stable(&file, 3)?;
+        let hash_regular = hash_file(&file)?;
+        let hash_bytes = hash_bytes(data);
+
+        assert_eq!(hash_stable, hash_regular);
+        assert_eq!(hash_stable, hash_bytes);
+        Ok(())
     }
 }

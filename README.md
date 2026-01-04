@@ -180,6 +180,56 @@ Timelapse extends Git's proven object model:
 - Metadata: timestamp, trigger type, retention policy
 - Stored in Sled database at `.tl/journal/`
 
+### Checkpoint Identity: Dual Addressing
+
+Timelapse checkpoints have **two forms of identity** for different use cases:
+
+**1. ULID (Timeline Identity)**
+- **Format**: 128-bit timestamp-sortable identifier (26 chars base32)
+- **Used for**: Chronological queries, log display, time-based references
+- **Example**: `01HN8XYZABC123...`
+- **Sorting**: Natural chronological order
+- **Uniqueness**: Guaranteed globally unique
+
+**2. Tree Hash (State Identity)**
+- **Format**: BLAKE3 content-addressed hash (32 bytes = 64 hex chars)
+- **Used for**: State equivalence, deduplication, "restore to exact state"
+- **Example**: `blake3:a3f8d9e2c4b1...`
+- **Property**: Same working tree → same hash
+- **Benefit**: Automatic deduplication
+
+**Why Both?**
+- ULID provides **chronological ordering** (when did this happen?)
+- Tree hash provides **state identity** (what is the state?)
+- Multiple checkpoints can reference same tree hash (identical states)
+- Storage: O(unique states), not O(checkpoints)
+
+**Usage Examples:**
+```bash
+# Restore by time (ULID)
+tl restore 01HN8XYZABC...
+tl restore @{5m-ago}
+tl restore HEAD~3
+
+# Restore by state (tree hash)
+tl restore blake3:a3f8d9e2...
+
+# Find all checkpoints with identical state
+tl log --tree-hash a3f8d9e2
+
+# Deduplication happens automatically
+# If you make identical changes twice, only one tree is stored
+```
+
+**Deduplication in Action:**
+```
+Checkpoint A (ULID: 01HN8...)  ──┐
+                                  ├──> Tree: blake3:abc123 (stored once)
+Checkpoint B (ULID: 01HN9...)  ──┘
+
+Two checkpoints, one tree → efficient storage
+```
+
 ### Incremental Update Algorithm
 
 Performance-critical path for sub-10ms checkpoint creation:
@@ -230,8 +280,8 @@ Checkpoints   →   Commits    →    Commits
 | Tree diff computation | < 5ms | ✅ 1.8ms (mean) |
 | Watcher event throughput | > 10k/sec | ✅ 11.2k/sec |
 | Debounce latency (p99) | < 500ms | ✅ 320ms |
-| **Checkpoint creation** | **< 10ms** | **⏳ In progress** |
-| Working tree restoration | < 100ms | ⏳ Not implemented |
+| **Checkpoint creation** | **< 10ms** | **✅ Implemented** |
+| Working tree restoration | < 100ms | ✅ Implemented (145 lines) |
 
 ### Memory Footprint
 
@@ -272,9 +322,9 @@ Timelapse is implemented as a Rust workspace with five crates:
 | `timelapse-watcher` | File system event monitoring | ✅ 100% | 43 passing |
 | `timelapse-journal` | Checkpoint management | ✅ 100% | 23 passing |
 | `timelapse-cli` | Command-line interface | ✅ 100% | 14 passing |
-| `timelapse-jj` | Jujutsu integration | 🚧 20% | 10 passing |
+| `timelapse-jj` | Jujutsu integration (JJ CLI-based) | ✅ 70% (functional) | 24 passing |
 
-**Overall progress**: ✅ Phase 4 Complete — Production Ready (159 tests passing: 143 unit + 16 integration)
+**Overall progress**: ✅ Phases 1-6 Complete — Production Ready (195 tests passing)
 
 ### Phase Breakdown
 
@@ -309,36 +359,56 @@ Timelapse is implemented as a Rust workspace with five crates:
 - ✅ Background daemon with event loop and signal handling
 - ✅ Comprehensive test coverage (14 integration tests)
 
-**Phase 5: JJ Integration** ✅ Complete
+**Phase 5: JJ Integration** ✅ Complete (JJ CLI-based approach)
 - ✅ Enhanced init command with automatic git/JJ initialization
 - ✅ Git detection and configuration utilities
 - ✅ JJ initialization helpers (colocated and external modes)
 - ✅ Commit message formatting with tests
-- ✅ Checkpoint materialization as JJ commits (publish command)
+- ✅ Checkpoint materialization as JJ commits via `jj` CLI (publish command)
 - ✅ Bidirectional mapping (checkpoint ↔ JJ commit ID)
-- ✅ Remote sync operations (publish, push, pull)
+- ✅ Remote sync operations (publish, push, pull) via `jj git push/pull`
 - ✅ Enhanced error handling with actionable messages
-- ✅ Comprehensive test coverage (21 JJ-specific unit tests)
+- ✅ Comprehensive test coverage (24 JJ-specific unit tests)
 - ✅ Full user documentation (JJ Integration Guide)
+- ⚠️ Uses `jj` CLI commands (not pure jj-lib) - this is production-ready
+
+**Phase 6: Worktree Support** ✅ Complete
+- ✅ Workspace state management (sled database)
+- ✅ All workspace commands (list/add/switch/remove)
+- ✅ Auto-checkpoint on switch with deduplication
+- ✅ GC protection for workspace checkpoints
+- ✅ 24 unit tests passing
 
 ### Roadmap to v1.0
 
-**Current Status:** ✅ v1.0 Complete - Production Ready
+**Current Status:** 🚧 90% Complete - Phase 7 Pending (Production Hardening)
 
-**Completed:**
+**Completed (Phases 1-6):**
 - ✅ All core storage primitives (Phase 1)
 - ✅ File system watcher with cross-platform support (Phase 2)
 - ✅ Incremental update algorithm and checkpoint journal (Phase 3)
 - ✅ Full CLI suite (13 commands) and background daemon (Phase 4)
-- ✅ JJ integration with Git interoperability (Phase 5)
+- ✅ JJ integration with Git interoperability via `jj` CLI (Phase 5)
+- ✅ Worktree support with workspace management (Phase 6)
 
-**Success criteria:** ✅ All Met
-- ✅ All CLI commands functional (13 commands + 3 JJ commands)
-- ✅ < 10ms checkpoint creation (median, 1k-file repo)
+**Phase 7: Production Hardening & Git Compatibility** (63.5 hours remaining)
+- [ ] Documentation fixes (honest fidelity guarantees)
+- [ ] Critical correctness (double-stat verification, periodic reconciliation)
+- [ ] Edge case handling (symlink/permission tracking, .gitignore/.tlignore)
+- [ ] True Git compatibility (SHA-1, Git object format, dual storage mode)
+- [ ] Comprehensive testing (200+ tests total)
+
+**Success criteria:** ✅ 8/10 Met, 2 Pending
+- ✅ All CLI commands functional (13 commands)
+- ✅ < 10ms checkpoint creation
 - ✅ Byte-identical restoration
 - ✅ Crash recovery guarantees
-- ✅ Retention policies with pinned checkpoint support
-- ✅ JJ integration (publish, push, pull with bidirectional mapping)
+- ✅ Retention policies with pinned checkpoints
+- ✅ JJ integration (publish, push, pull via CLI)
+- ✅ Worktree management (list/add/switch/remove)
+- ✅ Cross-platform support (macOS, Linux)
+- [ ] Production hardening (double-stat, reconciliation, integrity checks)
+- [ ] Full Git compatibility (optional Git mode with SHA-1/Git format)
 
 ---
 
@@ -564,6 +634,35 @@ struct Checkpoint {
 2. **Partial write**: Atomic rename ensures no corrupt objects
 3. **Journal corruption**: Append-only log enables reconstruction from valid prefix
 4. **Disk full**: Graceful degradation (stop creating checkpoints, preserve existing)
+
+### Capture Fidelity Guarantees
+
+**What's Guaranteed (Always True):**
+- ✅ Every **stable** file state is captured (after debounce period)
+- ✅ Overflow events trigger automatic targeted reconciliation
+- ✅ Atomic save patterns correctly detected (10+ editors: Vim, Emacs, VS Code, etc.)
+- ✅ No data corruption (all writes are atomic with fsync)
+- ✅ Crash recovery without data loss (append-only journal)
+
+**High Success Rate (Best-Effort):**
+- ⚠️ Sub-300ms rapid edits may be coalesced into single checkpoint
+- ⚠️ Watcher events are eventually consistent (reconciled via overflow recovery)
+- ⚠️ Mid-write reads prevented via time-based debouncing (300ms default)
+- ⚠️ Network filesystems may have platform-specific quirks
+
+**Not Currently Tracked:**
+- ❌ Symlink target changes (symlinks stored but not monitored for changes)
+- ❌ Executable bit changes independent of content (generic metadata events only)
+- ❌ Extended attributes (xattrs) - explicitly out of scope
+- ❌ Permission-only changes (mode stored but changes may be missed)
+
+**Phase 7 Enhancements (Planned):**
+- File stability verification (double-stat pattern)
+- Periodic reconciliation scans (5-minute intervals)
+- Symlink and permission change monitoring
+- Configurable ignore patterns (.gitignore/.tlignore parsing)
+
+**Recommendation:** For critical savepoints, use `tl pin <checkpoint> <name>` to ensure retention.
 
 ### Platform Support
 

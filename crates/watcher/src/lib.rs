@@ -10,6 +10,7 @@ pub mod platform;
 pub mod debounce;
 pub mod coalesce;
 pub mod overflow;
+pub mod reconcile;
 
 use anyhow::Result;
 use dashmap::DashMap;
