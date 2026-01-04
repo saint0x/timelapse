@@ -8,11 +8,11 @@ use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Main store for Seer checkpoint data
+/// Main store for Timelapse checkpoint data
 ///
-/// Manages the `.snap/` directory structure:
+/// Manages the `.tl/` directory structure:
 /// ```
-/// .snap/
+/// .tl/
 ///   config.toml
 ///   HEAD
 ///   locks/
@@ -38,8 +38,8 @@ use std::sync::Arc;
 pub struct Store {
     /// Root of repository
     root: PathBuf,
-    /// Path to .snap directory
-    snap_dir: PathBuf,
+    /// Path to .tl directory
+    tl_dir: PathBuf,
     /// Blob storage
     blob_store: BlobStore,
     /// Tree cache (hash -> tree)
@@ -50,7 +50,7 @@ impl Store {
     /// Initialize a new store at the given repository root
     pub fn init(repo_root: &Path) -> Result<Self> {
         // TODO: Implement store initialization
-        // - Create .snap/ directory
+        // - Create .tl/ directory
         // - Create all subdirectories
         // - Create config.toml with defaults
         // - Initialize empty ops.log
@@ -61,7 +61,7 @@ impl Store {
     /// Open an existing store
     pub fn open(repo_root: &Path) -> Result<Self> {
         // TODO: Implement store opening
-        // - Validate .snap/ directory exists
+        // - Validate .tl/ directory exists
         // - Load configuration
         // - Initialize blob store
         // - Return Store instance
@@ -103,9 +103,9 @@ impl Store {
         &self.blob_store
     }
 
-    /// Get the .snap directory path
-    pub fn snap_dir(&self) -> &Path {
-        &self.snap_dir
+    /// Get the .tl directory path
+    pub fn tl_dir(&self) -> &Path {
+        &self.tl_dir
     }
 
     /// Get the repository root path
@@ -145,13 +145,13 @@ pub fn normalize_path(path: &Path) -> Result<PathBuf> {
 /// Check if a path should be ignored
 ///
 /// Always ignores:
-/// - `.snap/`
+/// - `.tl/`
 /// - `.git/`
 pub fn should_ignore(path: &Path) -> bool {
     // TODO: Implement ignore check
-    // - Check if path starts with .snap/ or .git/
+    // - Check if path starts with .tl/ or .git/
     // - Future: support .gitignore-like rules
-    path.starts_with(".snap") || path.starts_with(".git")
+    path.starts_with(".tl") || path.starts_with(".git")
 }
 
 #[cfg(test)]
@@ -163,7 +163,7 @@ mod tests {
         // TODO: Test store initialization
         // - Create temp directory
         // - Initialize store
-        // - Verify .snap/ structure exists
+        // - Verify .tl/ structure exists
         // - Verify all subdirectories exist
     }
 
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_should_ignore() {
         // TODO: Test ignore rules
-        // assert!(should_ignore(Path::new(".snap/config.toml")));
+        // assert!(should_ignore(Path::new(".tl/config.toml")));
         // assert!(should_ignore(Path::new(".git/HEAD")));
         // assert!(!should_ignore(Path::new("src/main.rs")));
     }

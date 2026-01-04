@@ -1,4 +1,4 @@
-//! Seer Core - Content-addressed storage primitives for Seer checkpoint system
+//! Timelapse Core - Content-addressed storage primitives for Timelapse checkpoint system
 //!
 //! This crate provides the foundational storage layer:
 //! - BLAKE3 hashing
@@ -17,5 +17,5 @@ pub use blob::{Blob, BlobStore, BlobHeaderV1};
 pub use tree::{Tree, Entry, EntryKind, TreeDiff};
 pub use store::Store;
 
-/// Common result type used throughout seer-core
+/// Common result type used throughout timelapse-core
 pub type Result<T> = anyhow::Result<T>;

@@ -1,5 +1,5 @@
 [package]
-name = "seer-watcher"
+name = "journal"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,16 +7,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# File watching
-notify = { workspace = true }
+# Embedded database
+sled = { workspace = true }
 
 # Core dependency
-seer-core = { path = "../seer-core" }
+core = { path = "../core" }
 
 # Utilities
+ulid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 
 # Concurrency
-crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }

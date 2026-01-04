@@ -2,7 +2,7 @@
 //!
 //! The performance linchpin: update tree from dirty paths without full rescan
 
-use seer_core::{Blake3Hash, Tree, Entry};
+use core::{Blake3Hash, Tree, Entry};
 use crate::PathMap;
 use std::path::Path;
 
@@ -28,7 +28,7 @@ pub fn incremental_update(
 fn normalize_dirty_paths(paths: Vec<&Path>, repo_root: &Path) -> Vec<std::path::PathBuf> {
     // TODO: Implement path normalization
     // - Convert to repo-relative
-    // - Drop .snap/ and .git/
+    // - Drop .tl/ and .git/
     // - Deduplicate
     todo!("Implement normalize_dirty_paths")
 }

@@ -1,5 +1,5 @@
 [package]
-name = "seer-jj"
+name = "jj"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,8 +11,8 @@ repository.workspace = true
 jj-lib = { workspace = true }
 
 # Core dependencies
-seer-core = { path = "../seer-core" }
-seer-journal = { path = "../seer-journal" }
+core = { path = "../core" }
+journal = { path = "../journal" }
 
 # Utilities
 anyhow = { workspace = true }

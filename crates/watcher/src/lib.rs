@@ -1,4 +1,4 @@
-//! File system watching for Seer
+//! File system watching for Timelapse
 //!
 //! This crate provides platform-specific file system watching with:
 //! - Per-path debouncing (200-500ms configurable)

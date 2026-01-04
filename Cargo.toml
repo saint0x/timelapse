@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/seer-core",
-    "crates/seer-watcher",
-    "crates/seer-journal",
-    "crates/seer-jj",
-    "crates/seer-cli",
+    "crates/core",
+    "crates/watcher",
+    "crates/journal",
+    "crates/jj",
+    "crates/cli",
 ]
 
 [workspace.dependencies]
@@ -57,9 +57,9 @@ criterion = "0.5"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Seer Contributors"]
+authors = ["Timelapse Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/seer"
+repository = "https://github.com/yourusername/timelapse"
 
 [profile.release]
 lto = "thin"

@@ -1,4 +1,4 @@
-//! Seer CLI - snap command
+//! Timelapse CLI - tl command
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -7,9 +7,9 @@ mod cmd;
 mod daemon;
 mod ipc;
 
-/// Seer - Lossless checkpoint stream for your code
+/// Timelapse - Lossless checkpoint stream for your code
 #[derive(Parser)]
-#[command(name = "snap")]
+#[command(name = "tl")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize Seer in the current repository
+    /// Initialize Timelapse in the current repository
     Init,
     /// Show daemon and checkpoint status
     Status,

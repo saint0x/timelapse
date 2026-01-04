@@ -2,15 +2,15 @@
 //!
 //! This crate provides:
 //! - Checkpoint → JJ commit materialization
-//! - `snap publish` (create JJ commit from checkpoint)
-//! - `snap push` / `snap pull` (Git interop via JJ)
+//! - `tl publish` (create JJ commit from checkpoint)
+//! - `tl push` / `tl pull` (Git interop via JJ)
 //! - Checkpoint ↔ JJ commit mapping
 
 pub mod materialize;
 pub mod mapping;
 
 use anyhow::Result;
-use seer_journal::Checkpoint;
+use journal::Checkpoint;
 
 /// Materialize a checkpoint as a JJ commit
 pub fn materialize_checkpoint(checkpoint: &Checkpoint) -> Result<()> {

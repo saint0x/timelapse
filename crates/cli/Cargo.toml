@@ -1,5 +1,5 @@
 [package]
-name = "seer-cli"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,15 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "snap"
+name = "tl"
 path = "src/main.rs"
 
 [dependencies]
-# All seer crates
-seer-core = { path = "../seer-core" }
-seer-watcher = { path = "../seer-watcher" }
-seer-journal = { path = "../seer-journal" }
-seer-jj = { path = "../seer-jj" }
+# All timelapse crates
+core = { path = "../core" }
+watcher = { path = "../watcher" }
+journal = { path = "../journal" }
+jj = { path = "../jj" }
 
 # CLI
 clap = { workspace = true }

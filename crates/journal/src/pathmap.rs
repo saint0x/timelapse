@@ -1,6 +1,6 @@
 //! PathMap state cache for fast tree updates
 
-use seer_core::{Blake3Hash, Entry};
+use core::{Blake3Hash, Entry};
 use std::path::Path;
 
 /// Cached mapping of paths to entries (performance optimization)

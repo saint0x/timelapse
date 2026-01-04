@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-/// Start the Seer daemon
+/// Start the Timelapse daemon
 pub async fn start() -> Result<()> {
     // TODO: Implement daemon start
     // - Check if already running
@@ -12,7 +12,7 @@ pub async fn start() -> Result<()> {
     todo!("Implement daemon start")
 }
 
-/// Stop the Seer daemon
+/// Stop the Timelapse daemon
 pub async fn stop() -> Result<()> {
     // TODO: Implement daemon stop
     // - Send stop signal via IPC

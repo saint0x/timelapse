@@ -1,6 +1,6 @@
 //! Checkpoint data structures
 
-use seer_core::Blake3Hash;
+use core::Blake3Hash;
 
 /// A checkpoint represents a snapshot of the repository at a point in time
 #[derive(Debug, Clone)]

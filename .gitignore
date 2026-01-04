@@ -14,8 +14,8 @@ Cargo.lock
 .AppleDouble
 .LSOverride
 
-# Seer runtime
-.snap/
+# Timelapse runtime
+.tl/
 
 # Logs
 *.log

@@ -1,4 +1,4 @@
-//! Core performance benchmarks for seer-core
+//! Core performance benchmarks for timelapse-core
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
