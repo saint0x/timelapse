@@ -11,6 +11,7 @@ pub mod debounce;
 pub mod coalesce;
 pub mod overflow;
 pub mod reconcile;
+pub mod ignore;
 
 use anyhow::Result;
 use dashmap::DashMap;

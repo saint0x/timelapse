@@ -160,6 +160,16 @@ fn reconcile_file(
         store.blob_store().write_blob(blob_hash, &contents)?;
     }
 
+    // Check if entry exists and mode has changed (permission-only change detection)
+    if let Some(existing_entry) = map.get(path) {
+        // Only update if hash OR mode changed
+        if existing_entry.blob_hash == blob_hash && existing_entry.mode == mode {
+            // No change - skip update
+            return Ok(());
+        }
+        // Otherwise, update with new entry (hash or mode changed)
+    }
+
     // Update map with new entry
     let entry = Entry::file(mode, blob_hash);
     map.update(path, Some(entry));
@@ -180,6 +190,15 @@ fn reconcile_symlink(
 
     // Hash the target path (not the content it points to)
     let blob_hash = hash::hash_bytes(target_bytes.as_bytes());
+
+    // Check if symlink target has changed
+    if let Some(existing_entry) = map.get(path) {
+        if existing_entry.blob_hash == blob_hash {
+            // Symlink target unchanged - skip update
+            return Ok(());
+        }
+        // Otherwise, target changed - update entry
+    }
 
     // Store the target as a blob
     if !store.blob_store().has_blob(blob_hash) {

@@ -33,6 +33,7 @@ toml = "0.8"
 
 # File watching
 notify = { version = "6.1", features = ["macos_fsevent"] }
+ignore = "0.4"  # .gitignore/.tlignore pattern parsing
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
