@@ -1,6 +1,241 @@
 //! Checkpoint ↔ JJ commit ID mapping
+//!
+//! This module provides bidirectional mapping between Timelapse checkpoint IDs (ULIDs)
+//! and JJ commit IDs (hex strings). The mapping is persisted in a sled database at
+//! `.tl/state/jj-mapping/`.
+//!
+//! The mapping enables:
+//! - Finding which JJ commit corresponds to a checkpoint (for incremental publishing)
+//! - Finding which checkpoint corresponds to a JJ commit (for import on pull)
+//! - Verifying mapping integrity
 
-// TODO: Implement bidirectional mapping storage
-// - Store checkpoint ID → JJ commit ID
-// - Store JJ commit ID → checkpoint ID
-// - Persist mapping in .snap/state/jj-mapping.db
+use anyhow::{Context, Result};
+use std::path::Path;
+use ulid::Ulid;
+
+// Note: We alias our core crate as tl_core in Cargo.toml to avoid conflicts with std::core
+
+/// Bidirectional mapping between checkpoint IDs and JJ commit IDs
+pub struct JjMapping {
+    db: sled::Db,
+}
+
+impl JjMapping {
+    /// Open the mapping database at `.tl/state/jj-mapping/`
+    ///
+    /// Creates the database if it doesn't exist.
+    pub fn open(tl_dir: &Path) -> Result<Self> {
+        let db_path = tl_dir.join("state/jj-mapping");
+        let db = sled::open(&db_path)
+            .with_context(|| format!("Failed to open JJ mapping database at {}", db_path.display()))?;
+
+        Ok(Self { db })
+    }
+
+    /// Store mapping: checkpoint_id → jj_commit_id
+    ///
+    /// This is the forward mapping, used when we publish a checkpoint to JJ
+    /// and want to remember which JJ commit it became.
+    pub fn set(&self, checkpoint_id: Ulid, jj_commit_id: &str) -> Result<()> {
+        let key = checkpoint_id.to_string();
+        self.db.insert(key.as_bytes(), jj_commit_id.as_bytes())
+            .context("Failed to store checkpoint → JJ commit mapping")?;
+        self.db.flush()
+            .context("Failed to flush JJ mapping database")?;
+
+        Ok(())
+    }
+
+    /// Get JJ commit ID for a checkpoint
+    ///
+    /// Returns None if the checkpoint has not been published to JJ.
+    pub fn get_jj_commit(&self, checkpoint_id: Ulid) -> Result<Option<String>> {
+        let key = checkpoint_id.to_string();
+        if let Some(value) = self.db.get(key.as_bytes())
+            .context("Failed to query JJ mapping database")? {
+            let commit_id = String::from_utf8(value.to_vec())
+                .context("Invalid UTF-8 in stored JJ commit ID")?;
+            return Ok(Some(commit_id));
+        }
+        Ok(None)
+    }
+
+    /// Store reverse mapping: jj_commit_id → checkpoint_id
+    ///
+    /// This is used when importing JJ commits to find if we already have
+    /// a checkpoint for this commit.
+    pub fn set_reverse(&self, jj_commit_id: &str, checkpoint_id: Ulid) -> Result<()> {
+        let key = format!("rev:{}", jj_commit_id);
+        let value = checkpoint_id.to_string();
+        self.db.insert(key.as_bytes(), value.as_bytes())
+            .context("Failed to store JJ commit → checkpoint mapping")?;
+        self.db.flush()
+            .context("Failed to flush JJ mapping database")?;
+
+        Ok(())
+    }
+
+    /// Get checkpoint ID for a JJ commit
+    ///
+    /// Returns None if the JJ commit has not been imported as a checkpoint.
+    pub fn get_checkpoint(&self, jj_commit_id: &str) -> Result<Option<Ulid>> {
+        let key = format!("rev:{}", jj_commit_id);
+        if let Some(value) = self.db.get(key.as_bytes())
+            .context("Failed to query JJ mapping database")? {
+            let id_str = String::from_utf8(value.to_vec())
+                .context("Invalid UTF-8 in stored checkpoint ID")?;
+            let checkpoint_id = Ulid::from_string(&id_str)
+                .context("Invalid ULID in stored checkpoint ID")?;
+            return Ok(Some(checkpoint_id));
+        }
+        Ok(None)
+    }
+
+    /// Remove mapping for a checkpoint
+    ///
+    /// This is useful for garbage collection or resetting mappings.
+    pub fn remove(&self, checkpoint_id: Ulid) -> Result<()> {
+        let key = checkpoint_id.to_string();
+
+        // Get JJ commit ID so we can remove reverse mapping too
+        if let Some(jj_commit_id) = self.get_jj_commit(checkpoint_id)? {
+            let rev_key = format!("rev:{}", jj_commit_id);
+            self.db.remove(rev_key.as_bytes())
+                .context("Failed to remove reverse mapping")?;
+        }
+
+        self.db.remove(key.as_bytes())
+            .context("Failed to remove forward mapping")?;
+        self.db.flush()?;
+
+        Ok(())
+    }
+
+    /// Get all mapped checkpoints
+    ///
+    /// Returns an iterator of (checkpoint_id, jj_commit_id) pairs.
+    /// Only includes forward mappings (not reverse).
+    pub fn all_mappings(&self) -> Result<Vec<(Ulid, String)>> {
+        let mut mappings = Vec::new();
+
+        for item in self.db.iter() {
+            let (key, value) = item.context("Failed to iterate mappings")?;
+            let key_str = String::from_utf8(key.to_vec())
+                .context("Invalid UTF-8 in mapping key")?;
+
+            // Skip reverse mappings (they start with "rev:")
+            if key_str.starts_with("rev:") {
+                continue;
+            }
+
+            let checkpoint_id = Ulid::from_string(&key_str)
+                .context("Invalid ULID in mapping key")?;
+            let jj_commit_id = String::from_utf8(value.to_vec())
+                .context("Invalid UTF-8 in mapping value")?;
+
+            mappings.push((checkpoint_id, jj_commit_id));
+        }
+
+        Ok(mappings)
+    }
+
+    /// Count of total mappings
+    pub fn count(&self) -> usize {
+        // Divide by 2 because we store both forward and reverse mappings
+        self.db.len() / 2
+    }
+
+    /// Clear all mappings (useful for testing or reset)
+    pub fn clear(&self) -> Result<()> {
+        self.db.clear()
+            .context("Failed to clear JJ mapping database")?;
+        self.db.flush()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_mapping_roundtrip() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mapping = JjMapping::open(temp_dir.path())?;
+
+        let checkpoint_id = Ulid::new();
+        let jj_commit_id = "abc123def456";
+
+        // Store forward and reverse mappings
+        mapping.set(checkpoint_id, jj_commit_id)?;
+        mapping.set_reverse(jj_commit_id, checkpoint_id)?;
+
+        // Verify forward lookup
+        let found_commit = mapping.get_jj_commit(checkpoint_id)?;
+        assert_eq!(found_commit, Some(jj_commit_id.to_string()));
+
+        // Verify reverse lookup
+        let found_checkpoint = mapping.get_checkpoint(jj_commit_id)?;
+        assert_eq!(found_checkpoint, Some(checkpoint_id));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_missing_mapping() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mapping = JjMapping::open(temp_dir.path())?;
+
+        let checkpoint_id = Ulid::new();
+
+        // Should return None for unmapped checkpoint
+        assert_eq!(mapping.get_jj_commit(checkpoint_id)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_mapping() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mapping = JjMapping::open(temp_dir.path())?;
+
+        let checkpoint_id = Ulid::new();
+        let jj_commit_id = "abc123";
+
+        mapping.set(checkpoint_id, jj_commit_id)?;
+        mapping.set_reverse(jj_commit_id, checkpoint_id)?;
+
+        // Verify it exists
+        assert!(mapping.get_jj_commit(checkpoint_id)?.is_some());
+
+        // Remove it
+        mapping.remove(checkpoint_id)?;
+
+        // Verify it's gone (both forward and reverse)
+        assert_eq!(mapping.get_jj_commit(checkpoint_id)?, None);
+        assert_eq!(mapping.get_checkpoint(jj_commit_id)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_all_mappings() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mapping = JjMapping::open(temp_dir.path())?;
+
+        let cp1 = Ulid::new();
+        let cp2 = Ulid::new();
+
+        mapping.set(cp1, "commit1")?;
+        mapping.set_reverse("commit1", cp1)?;
+        mapping.set(cp2, "commit2")?;
+        mapping.set_reverse("commit2", cp2)?;
+
+        let all = mapping.all_mappings()?;
+        assert_eq!(all.len(), 2);
+        assert_eq!(mapping.count(), 2);
+
+        Ok(())
+    }
+}

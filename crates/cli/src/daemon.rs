@@ -4,7 +4,7 @@ use crate::ipc::{handle_connection, DaemonStatus, IpcRequest, IpcResponse, IpcSe
 use crate::locks::DaemonLock;
 use crate::util;
 use anyhow::{Context, Result};
-use core::store::Store;
+use tl_core::store::Store;
 use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, Journal, PathMap};
 use std::collections::HashSet;
 use std::path::Path;
@@ -366,7 +366,7 @@ fn load_or_create_pathmap(tl_dir: &Path, journal: &Journal) -> Result<PathMap> {
                 let root_hash = journal
                     .latest()?
                     .map(|cp| cp.root_tree)
-                    .unwrap_or_else(|| core::hash::Blake3Hash::from_bytes([0u8; 32]));
+                    .unwrap_or_else(|| tl_core::hash::Blake3Hash::from_bytes([0u8; 32]));
                 Ok(PathMap::new(root_hash))
             }
         }
@@ -377,7 +377,7 @@ fn load_or_create_pathmap(tl_dir: &Path, journal: &Journal) -> Result<PathMap> {
         let root_hash = journal
             .latest()?
             .map(|cp| cp.root_tree)
-            .unwrap_or_else(|| core::hash::Blake3Hash::from_bytes([0u8; 32]));
+            .unwrap_or_else(|| tl_core::hash::Blake3Hash::from_bytes([0u8; 32]));
         Ok(PathMap::new(root_hash))
     }
 }

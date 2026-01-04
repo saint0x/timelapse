@@ -2,7 +2,7 @@
 
 use crate::util;
 use anyhow::{anyhow, Context, Result};
-use core::{Store, TreeDiff};
+use tl_core::{Store, TreeDiff};
 use journal::{Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::path::Path;

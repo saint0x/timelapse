@@ -2,7 +2,7 @@
 
 use crate::util;
 use anyhow::{Context, Result};
-use core::{Store, Tree, TreeDiff};
+use tl_core::{Store, Tree, TreeDiff};
 use journal::Journal;
 use owo_colors::OwoColorize;
 

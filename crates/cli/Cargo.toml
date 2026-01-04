@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # All timelapse crates
-core = { path = "../core" }
+tl_core = { path = "../core", package = "core" }
 watcher = { path = "../watcher" }
 journal = { path = "../journal" }
 jj = { path = "../jj" }

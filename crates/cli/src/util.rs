@@ -212,6 +212,193 @@ pub fn calculate_dir_size(dir: &Path) -> Result<u64> {
     Ok(total)
 }
 
+// ============================================================================
+// Git Integration Utilities
+// ============================================================================
+
+/// Detect if a .git directory exists at the given path
+pub fn detect_git_repo(path: &Path) -> Result<bool> {
+    let git_dir = path.join(".git");
+    Ok(git_dir.exists() && git_dir.is_dir())
+}
+
+/// Parse git config for user.name and user.email
+///
+/// Returns Some((name, email)) if both are found, None otherwise.
+/// Handles malformed configs gracefully by returning None.
+pub fn parse_git_user_config(repo_root: &Path) -> Result<Option<(String, String)>> {
+    let config_path = repo_root.join(".git/config");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None), // Can't read config, gracefully skip
+    };
+
+    let mut in_user_section = false;
+    let mut name = None;
+    let mut email = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Check for [user] section
+        if trimmed == "[user]" {
+            in_user_section = true;
+            continue;
+        }
+
+        // Check if we're leaving the [user] section
+        if in_user_section && trimmed.starts_with('[') {
+            break;
+        }
+
+        if in_user_section {
+            // Parse name = value
+            if let Some((key, value)) = trimmed.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+
+                match key {
+                    "name" => name = Some(value.to_string()),
+                    "email" => email = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match (name, email) {
+        (Some(n), Some(e)) => Ok(Some((n, e))),
+        _ => Ok(None),
+    }
+}
+
+/// Extract git remotes from .git/config
+///
+/// Returns Vec<(remote_name, url)> for all remotes found.
+/// Handles malformed configs by skipping problematic entries.
+pub fn parse_git_remotes(repo_root: &Path) -> Result<Vec<(String, String)>> {
+    let config_path = repo_root.join(".git/config");
+
+    if !config_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut remotes = Vec::new();
+    let mut current_remote: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Match [remote "name"] sections
+        if trimmed.starts_with("[remote \"") && trimmed.ends_with("\"]") {
+            // Extract remote name from [remote "origin"]
+            let start = "[remote \"".len();
+            let end = trimmed.len() - "\"]".len();
+            current_remote = Some(trimmed[start..end].to_string());
+            continue;
+        }
+
+        // Leaving remote section
+        if current_remote.is_some() && trimmed.starts_with('[') && !trimmed.starts_with("[remote") {
+            current_remote = None;
+        }
+
+        // Parse url in remote section
+        if let Some(ref remote_name) = current_remote {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                if key.trim() == "url" {
+                    let url = value.trim().trim_matches('"');
+                    remotes.push((remote_name.clone(), url.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(remotes)
+}
+
+/// Ensure .gitignore includes specified patterns (idempotent)
+///
+/// Creates .gitignore if it doesn't exist. Appends patterns only if they're not already present.
+/// Uses atomic writes to prevent corruption.
+pub fn ensure_gitignore_patterns(repo_root: &Path, patterns: &[&str]) -> Result<()> {
+    use std::fs;
+    use std::io::Write;
+
+    let gitignore_path = repo_root.join(".gitignore");
+
+    // Read existing content or start with empty
+    let existing_content = if gitignore_path.exists() {
+        fs::read_to_string(&gitignore_path)
+            .context("Failed to read .gitignore")?
+    } else {
+        String::new()
+    };
+
+    let existing_lines: Vec<&str> = existing_content.lines().collect();
+
+    // Filter patterns to only those not already present
+    let mut missing_patterns = Vec::new();
+    for pattern in patterns {
+        let trimmed = pattern.trim();
+        if !existing_lines.iter().any(|line| line.trim() == trimmed) {
+            missing_patterns.push(trimmed);
+        }
+    }
+
+    // If all patterns exist, nothing to do
+    if missing_patterns.is_empty() {
+        return Ok(());
+    }
+
+    // Build new content
+    let mut new_content = existing_content.clone();
+
+    // Ensure trailing newline if content exists
+    if !new_content.is_empty() && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+
+    // Add header comment if we're adding patterns
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str("# Timelapse (added by tl init)\n");
+
+    for pattern in missing_patterns {
+        new_content.push_str(pattern);
+        new_content.push('\n');
+    }
+
+    // Atomic write using temp file + rename
+    let temp_path = gitignore_path.with_extension("gitignore.tmp");
+    let mut temp_file = fs::File::create(&temp_path)
+        .context("Failed to create temporary .gitignore")?;
+
+    temp_file.write_all(new_content.as_bytes())
+        .context("Failed to write to temporary .gitignore")?;
+
+    temp_file.sync_all()
+        .context("Failed to sync temporary .gitignore")?;
+
+    drop(temp_file);
+
+    fs::rename(&temp_path, &gitignore_path)
+        .context("Failed to rename temporary .gitignore")?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +435,152 @@ mod tests {
         let one_day_ago = now_ms - (86400 * 1000);
         let result = format_relative_time(one_day_ago);
         assert!(result.contains("day"));
+    }
+
+    // ========================================================================
+    // Git utilities tests
+    // ========================================================================
+
+    #[test]
+    fn test_detect_git_repo() -> Result<()> {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new()?;
+        assert!(!detect_git_repo(temp.path())?, "Should not detect git in empty dir");
+
+        // Create .git directory
+        std::fs::create_dir(temp.path().join(".git"))?;
+        assert!(detect_git_repo(temp.path())?, "Should detect git directory");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_git_user_config() -> Result<()> {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new()?;
+        std::fs::create_dir(temp.path().join(".git"))?;
+
+        // Test with no config
+        let result = parse_git_user_config(temp.path())?;
+        assert!(result.is_none(), "Should return None when config doesn't exist");
+
+        // Test with valid config
+        let config = r#"
+[core]
+    repositoryformatversion = 0
+
+[user]
+    name = John Doe
+    email = john@example.com
+
+[remote "origin"]
+    url = https://github.com/user/repo.git
+"#;
+        std::fs::write(temp.path().join(".git/config"), config)?;
+
+        let result = parse_git_user_config(temp.path())?;
+        assert_eq!(
+            result,
+            Some(("John Doe".to_string(), "john@example.com".to_string())),
+            "Should parse user name and email"
+        );
+
+        // Test with missing email
+        let config_no_email = r#"
+[user]
+    name = Jane Doe
+"#;
+        std::fs::write(temp.path().join(".git/config"), config_no_email)?;
+
+        let result = parse_git_user_config(temp.path())?;
+        assert!(result.is_none(), "Should return None when email is missing");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_git_remotes() -> Result<()> {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new()?;
+        std::fs::create_dir(temp.path().join(".git"))?;
+
+        // Test with no remotes
+        let config_no_remotes = r#"
+[core]
+    repositoryformatversion = 0
+"#;
+        std::fs::write(temp.path().join(".git/config"), config_no_remotes)?;
+
+        let result = parse_git_remotes(temp.path())?;
+        assert!(result.is_empty(), "Should return empty vec with no remotes");
+
+        // Test with single remote
+        let config_single_remote = r#"
+[remote "origin"]
+    url = https://github.com/user/repo.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+"#;
+        std::fs::write(temp.path().join(".git/config"), config_single_remote)?;
+
+        let result = parse_git_remotes(temp.path())?;
+        assert_eq!(result.len(), 1, "Should find one remote");
+        assert_eq!(result[0].0, "origin", "Remote name should be origin");
+        assert_eq!(
+            result[0].1,
+            "https://github.com/user/repo.git",
+            "Remote URL should match"
+        );
+
+        // Test with multiple remotes
+        let config_multiple_remotes = r#"
+[remote "origin"]
+    url = https://github.com/user/repo.git
+
+[remote "upstream"]
+    url = https://github.com/upstream/repo.git
+"#;
+        std::fs::write(temp.path().join(".git/config"), config_multiple_remotes)?;
+
+        let result = parse_git_remotes(temp.path())?;
+        assert_eq!(result.len(), 2, "Should find two remotes");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ensure_gitignore_patterns() -> Result<()> {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new()?;
+
+        // Test creating new .gitignore
+        ensure_gitignore_patterns(temp.path(), &[".tl/", "*.log"])?;
+
+        let content = std::fs::read_to_string(temp.path().join(".gitignore"))?;
+        assert!(content.contains(".tl/"), "Should contain .tl/ pattern");
+        assert!(content.contains("*.log"), "Should contain *.log pattern");
+        assert!(content.contains("# Timelapse"), "Should contain header comment");
+
+        // Test idempotency - adding same patterns again
+        ensure_gitignore_patterns(temp.path(), &[".tl/"])?;
+
+        let content2 = std::fs::read_to_string(temp.path().join(".gitignore"))?;
+        assert_eq!(
+            content2.matches(".tl/").count(),
+            1,
+            "Should not duplicate patterns"
+        );
+
+        // Test appending new pattern to existing file
+        ensure_gitignore_patterns(temp.path(), &["*.tmp"])?;
+
+        let content3 = std::fs::read_to_string(temp.path().join(".gitignore"))?;
+        assert!(content3.contains("*.tmp"), "Should append new pattern");
+        assert!(content3.contains(".tl/"), "Should preserve existing patterns");
+
+        Ok(())
     }
 }

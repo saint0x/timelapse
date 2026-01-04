@@ -2,7 +2,7 @@
 
 use crate::util;
 use anyhow::{Context, Result};
-use core::Store;
+use tl_core::Store;
 use journal::{GarbageCollector, Journal, PinManager, RetentionPolicy};
 use owo_colors::OwoColorize;
 

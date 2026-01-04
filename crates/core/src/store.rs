@@ -3,7 +3,7 @@
 use crate::blob::BlobStore;
 use crate::hash::Blake3Hash;
 use crate::tree::Tree;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,6 +79,17 @@ max_cache_size = 104857600  # 100MB
 
 [watcher]
 debounce_ms = 100
+
+# VCS Integration (auto-populated by tl init)
+[vcs]
+git_initialized = false
+jj_initialized = false
+git_remote = ""  # Primary remote URL (if exists)
+
+# User Identity (synced from git config)
+[user]
+name = ""
+email = ""
 "#;
         fs::write(tl_dir.join("config.toml"), config_content)?;
 
@@ -326,6 +337,92 @@ pub fn normalize_path(path: &Path) -> Result<PathBuf> {
 
     // Convert back to PathBuf
     Ok(PathBuf::from(normalized))
+}
+
+// ============================================================================
+// Config Update Functions
+// ============================================================================
+
+/// Update VCS metadata in config.toml
+///
+/// Updates the [vcs] section with git/JJ initialization status and remote URL.
+/// Uses atomic writes to prevent corruption.
+pub fn update_vcs_config(
+    tl_dir: &Path,
+    git_initialized: bool,
+    jj_initialized: bool,
+    git_remote: Option<String>,
+) -> Result<()> {
+    use std::fs;
+
+    let config_path = tl_dir.join("config.toml");
+
+    // Read existing config
+    let content = fs::read_to_string(&config_path)
+        .context("Failed to read config.toml")?;
+
+    // Parse as TOML
+    let mut config: toml::Value = content.parse()
+        .context("Failed to parse config.toml as TOML")?;
+
+    // Update [vcs] section
+    let vcs = config.get_mut("vcs")
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("[vcs] section not found in config.toml"))?;
+
+    vcs.insert("git_initialized".to_string(), toml::Value::Boolean(git_initialized));
+    vcs.insert("jj_initialized".to_string(), toml::Value::Boolean(jj_initialized));
+    vcs.insert("git_remote".to_string(), toml::Value::String(git_remote.unwrap_or_default()));
+
+    // Serialize back to TOML
+    let new_content = toml::to_string_pretty(&config)
+        .context("Failed to serialize config to TOML")?;
+
+    // Atomic write
+    let tmp_dir = tl_dir.join("tmp");
+    atomic_write(&tmp_dir, &config_path, new_content.as_bytes())?;
+
+    Ok(())
+}
+
+/// Update user identity in config.toml
+///
+/// Updates the [user] section with name and email.
+/// Uses atomic writes to prevent corruption.
+pub fn update_user_config(
+    tl_dir: &Path,
+    name: &str,
+    email: &str,
+) -> Result<()> {
+    use std::fs;
+
+    let config_path = tl_dir.join("config.toml");
+
+    // Read existing config
+    let content = fs::read_to_string(&config_path)
+        .context("Failed to read config.toml")?;
+
+    // Parse as TOML
+    let mut config: toml::Value = content.parse()
+        .context("Failed to parse config.toml as TOML")?;
+
+    // Update [user] section
+    let user = config.get_mut("user")
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("[user] section not found in config.toml"))?;
+
+    user.insert("name".to_string(), toml::Value::String(name.to_string()));
+    user.insert("email".to_string(), toml::Value::String(email.to_string()));
+
+    // Serialize back to TOML
+    let new_content = toml::to_string_pretty(&config)
+        .context("Failed to serialize config to TOML")?;
+
+    // Atomic write
+    let tmp_dir = tl_dir.join("tmp");
+    atomic_write(&tmp_dir, &config_path, new_content.as_bytes())?;
+
+    Ok(())
 }
 
 /// Check if a path should be ignored

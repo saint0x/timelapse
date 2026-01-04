@@ -21,7 +21,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize Timelapse in the current repository
-    Init,
+    Init {
+        /// Skip git initialization even if .git doesn't exist
+        #[arg(long)]
+        skip_git: bool,
+
+        /// Skip JJ initialization even if .jj doesn't exist
+        #[arg(long)]
+        skip_jj: bool,
+    },
     /// Show daemon and checkpoint status
     Status,
     /// Show detailed repository information
@@ -58,18 +66,44 @@ enum Commands {
     },
     /// Run garbage collection
     Gc,
-    /// Publish checkpoint to JJ
+    /// Publish checkpoint(s) to JJ
     Publish {
-        /// Checkpoint ID or range
+        /// Checkpoint ID or range (e.g., HEAD or HEAD~10..HEAD)
         checkpoint: String,
+        /// Bookmark name (will be prefixed with snap/)
+        #[arg(short, long)]
+        bookmark: Option<String>,
+        /// Compact range into single commit (default: expand)
+        #[arg(long)]
+        compact: bool,
+        /// Don't auto-pin published checkpoints
+        #[arg(long)]
+        no_pin: bool,
+        /// Custom commit message template
+        #[arg(long)]
+        message_template: Option<String>,
     },
-    /// Push to Git via JJ
+    /// Push to Git remote via JJ
     Push {
-        /// Bookmark name
-        bookmark: String,
+        /// Bookmark name (optional, will be prefixed with snap/)
+        #[arg(short, long)]
+        bookmark: Option<String>,
+        /// Push all snap/* bookmarks
+        #[arg(long)]
+        all: bool,
+        /// Force push
+        #[arg(long)]
+        force: bool,
     },
-    /// Pull from Git via JJ
-    Pull,
+    /// Pull from Git remote via JJ
+    Pull {
+        /// Only fetch, don't import
+        #[arg(long)]
+        fetch_only: bool,
+        /// Don't auto-pin imported checkpoints
+        #[arg(long)]
+        no_pin: bool,
+    },
     /// Start the daemon
     Start {
         /// Run in foreground (for debugging)
@@ -88,7 +122,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => cmd::init::run().await,
+        Commands::Init { skip_git, skip_jj } => cmd::init::run(skip_git, skip_jj).await,
         Commands::Status => cmd::status::run().await,
         Commands::Info => cmd::info::run().await,
         Commands::Log { limit } => cmd::log::run(limit).await,
@@ -99,9 +133,15 @@ async fn main() -> Result<()> {
         Commands::Pin { checkpoint, name } => cmd::pin::run(&checkpoint, &name).await,
         Commands::Unpin { name } => cmd::unpin::run(&name).await,
         Commands::Gc => cmd::gc::run().await,
-        Commands::Publish { checkpoint } => cmd::publish::run(&checkpoint).await,
-        Commands::Push { bookmark } => cmd::push::run(&bookmark).await,
-        Commands::Pull => cmd::pull::run().await,
+        Commands::Publish { checkpoint, bookmark, compact, no_pin, message_template } => {
+            cmd::publish::run(&checkpoint, bookmark, compact, no_pin, message_template).await
+        }
+        Commands::Push { bookmark, all, force } => {
+            cmd::push::run(bookmark, all, force).await
+        }
+        Commands::Pull { fetch_only, no_pin } => {
+            cmd::pull::run(fetch_only, no_pin).await
+        }
         Commands::Start { foreground } => cmd::start::run(foreground).await,
         Commands::Stop => cmd::stop::run().await,
     }

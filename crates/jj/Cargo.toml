@@ -11,9 +11,14 @@ repository.workspace = true
 jj-lib = { workspace = true }
 
 # Core dependencies
-core = { path = "../core" }
+tl_core = { path = "../core", package = "core" }
 journal = { path = "../journal" }
 
 # Utilities
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+sled = { workspace = true }
+ulid = { workspace = true }
+blake3 = { workspace = true }
+config = "0.13"
+tempfile = { workspace = true }

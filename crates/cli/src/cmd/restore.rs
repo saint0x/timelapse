@@ -2,7 +2,7 @@
 
 use crate::util;
 use anyhow::{anyhow, Context, Result};
-use core::{Entry, Store};
+use tl_core::{Entry, Store};
 use journal::{Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::fs;

@@ -1,7 +1,7 @@
 //! Show detailed repository information and statistics
 
 use anyhow::{Context, Result};
-use core::store::Store;
+use tl_core::store::Store;
 use journal::Journal;
 use std::fs;
 use std::path::{Path, PathBuf};
