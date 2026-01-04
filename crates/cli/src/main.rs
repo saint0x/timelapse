@@ -22,6 +22,8 @@ enum Commands {
     Init,
     /// Show daemon and checkpoint status
     Status,
+    /// Show detailed repository information
+    Info,
     /// Show checkpoint timeline
     Log,
     /// Show diff between checkpoints
@@ -74,6 +76,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init => cmd::init::run().await,
         Commands::Status => cmd::status::run().await,
+        Commands::Info => cmd::info::run().await,
         Commands::Log => cmd::log::run().await,
         Commands::Diff { checkpoint_a, checkpoint_b } => {
             cmd::diff::run(&checkpoint_a, &checkpoint_b).await

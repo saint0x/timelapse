@@ -18,6 +18,7 @@ ulid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
 
 # Concurrency
 parking_lot = { workspace = true }

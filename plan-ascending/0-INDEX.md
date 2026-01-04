@@ -42,9 +42,10 @@ Each numbered file contains a complete checklist for one major phase of developm
 
 ---
 
-### [2.md](./2.md) - File System Watcher
+### [2.md](./2.md) - File System Watcher ✅ COMPLETE
 **Dependencies:** Phase 1 (core)
 **Estimated Scope:** ~25% of total work
+**Status:** 43 tests passing
 
 **Key Deliverables:**
 - Platform abstraction (macOS FSEvents + Linux inotify)
@@ -67,9 +68,10 @@ Each numbered file contains a complete checklist for one major phase of developm
 
 ---
 
-### [3.md](./3.md) - Checkpoint Journal & Incremental Updates
+### [3.md](./3.md) - Checkpoint Journal & Incremental Updates 🚧 IN PROGRESS
 **Dependencies:** Phase 1 (core)
 **Estimated Scope:** ~20% of total work
+**Status:** 30% complete - Core types & journal implemented, incremental updater pending
 
 **Key Deliverables:**
 - Checkpoint data structures (ULID-based IDs)
@@ -92,9 +94,10 @@ Each numbered file contains a complete checklist for one major phase of developm
 
 ---
 
-### [4.md](./4.md) - CLI & Daemon
+### [4.md](./4.md) - CLI & Daemon 🚧 PARTIAL
 **Dependencies:** Phases 1-3 (all crates)
 **Estimated Scope:** ~10% of total work
+**Status:** 15% complete - init/info commands done, 10 commands pending
 
 **Key Deliverables:**
 - Complete CLI (`tlinit`, `status`, `log`, `diff`, `restore`, `pin`, `gc`)

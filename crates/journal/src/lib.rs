@@ -14,7 +14,7 @@ pub mod incremental;
 pub mod retention;
 
 // Re-exports
-pub use checkpoint::Checkpoint;
+pub use checkpoint::{Checkpoint, CheckpointMeta, CheckpointReason};
 pub use journal::Journal;
 pub use pathmap::PathMap;
 

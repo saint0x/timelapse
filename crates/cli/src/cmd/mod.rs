@@ -2,6 +2,7 @@
 
 pub mod init;
 pub mod status;
+pub mod info;
 pub mod log;
 pub mod diff;
 pub mod restore;

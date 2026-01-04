@@ -2,9 +2,10 @@
 
 use std::path::Path;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 /// A BLAKE3 hash (32 bytes)
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Blake3Hash([u8; 32]);
 
 impl Blake3Hash {
