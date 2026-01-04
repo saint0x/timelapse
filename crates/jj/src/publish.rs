@@ -51,6 +51,24 @@ pub fn materialize_checkpoint_to_dir(
         let content = store.blob_store().read_blob(entry.blob_hash)
             .with_context(|| format!("Failed to read blob for {}", path_str))?;
 
+        // Handle symlinks
+        if entry.kind == tl_core::EntryKind::Symlink {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::symlink;
+                let target = std::str::from_utf8(&content)
+                    .with_context(|| format!("Invalid UTF-8 in symlink target: {}", path_str))?;
+                symlink(target, &file_path)
+                    .with_context(|| format!("Failed to create symlink: {}", file_path.display()))?;
+                continue; // Skip regular file handling
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("Warning: Symlinks not supported on Windows, writing as file: {}", path_str);
+                // Fall through to write as regular file
+            }
+        }
+
         // Write file
         fs::write(&file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path.display()))?;

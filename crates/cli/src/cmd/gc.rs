@@ -2,9 +2,11 @@
 
 use crate::util;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use tl_core::Store;
 use journal::{GarbageCollector, Journal, PinManager, RetentionPolicy};
 use owo_colors::OwoColorize;
+use ulid::Ulid;
 
 pub async fn run() -> Result<()> {
     // 1. Find repository root
@@ -23,17 +25,33 @@ pub async fn run() -> Result<()> {
     // 3. Create pin manager
     let pin_manager = PinManager::new(&tl_dir);
 
-    // 4. Create GC with default retention policy
+    // 4. Collect workspace checkpoints (if JJ workspace exists)
+    let workspace_checkpoints = if jj::detect_jj_workspace(&repo_root)?.is_some() {
+        let ws_manager = jj::WorkspaceManager::open(&tl_dir, &repo_root)?;
+        let mut checkpoints = HashSet::new();
+
+        for state in ws_manager.list_states()? {
+            if let Some(cp_id) = state.current_checkpoint {
+                checkpoints.insert(cp_id);
+            }
+        }
+
+        Some(checkpoints)
+    } else {
+        None
+    };
+
+    // 5. Create GC with default retention policy
     let policy = RetentionPolicy::default();
     let gc = GarbageCollector::new(policy);
 
     println!("{}", "Running Garbage Collection...".bold());
     println!();
 
-    // 5. Run GC
-    let metrics = gc.collect(&mut journal, &mut store, &pin_manager)?;
+    // 6. Run GC with workspace checkpoint protection
+    let metrics = gc.collect(&mut journal, &mut store, &pin_manager, workspace_checkpoints.as_ref())?;
 
-    // 6. Display results
+    // 7. Display results
     println!("{}", "GC Complete".green().bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();

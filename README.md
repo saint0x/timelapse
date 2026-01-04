@@ -31,6 +31,81 @@ Timelapse addresses this gap by providing infrastructure-level checkpoint captur
 
 ---
 
+## CLI Reference
+
+### Initialization & Setup
+```bash
+tl init                    # Initialize timelapse in current repository
+tl init --skip-git        # Skip git initialization
+tl init --skip-jj         # Skip JJ initialization
+```
+
+### Daemon Management
+```bash
+tl start                   # Start background daemon
+tl start --foreground     # Run daemon in foreground (for debugging)
+tl stop                    # Stop background daemon
+tl status                  # Show daemon and checkpoint status
+tl info                    # Show detailed repository information
+```
+
+### Checkpoint Operations
+```bash
+tl log                     # Show checkpoint timeline (default: 20)
+tl log --limit 50         # Show more checkpoints
+tl restore <checkpoint>    # Restore working tree to checkpoint
+tl diff <id-a> <id-b>     # Show diff between checkpoints
+```
+
+### Pin Management
+```bash
+tl pin <checkpoint> <name> # Pin checkpoint with a name
+tl unpin <name>            # Remove pin
+```
+
+### Worktree Management (JJ Workspaces)
+```bash
+tl worktree list           # List all workspaces with status
+tl worktree add <name>     # Create new workspace
+tl worktree add <name> --path /custom/path
+tl worktree add <name> --from <checkpoint>
+tl worktree add <name> --no-checkpoint
+tl worktree switch <name>  # Switch to workspace (auto-save/restore)
+tl worktree remove <name>  # Remove workspace metadata
+tl worktree remove <name> --delete-files
+tl worktree remove <name> --delete-files --yes
+```
+
+### JJ Integration
+```bash
+tl publish <checkpoint>    # Publish checkpoint to JJ
+tl publish <checkpoint> --bookmark <name>
+tl publish <checkpoint> --compact
+tl publish <checkpoint> --no-pin
+tl publish <checkpoint> --message-template <template>
+tl push                    # Push to Git remote via JJ
+tl push --bookmark <name>
+tl push --all
+tl push --force
+tl pull                    # Pull from Git remote via JJ
+tl pull --fetch-only
+tl pull --no-pin
+```
+
+### Garbage Collection
+```bash
+tl gc                      # Run garbage collection
+```
+
+### Checkpoint Reference Formats
+- Full ULID: `01HN8XYZ...`
+- Short prefix: `01HN8` (must be unique)
+- Pin name: `my-pin`
+- Workspace pin: `ws:feature-name` (auto-created)
+- HEAD: Latest checkpoint
+
+---
+
 ## System Architecture
 
 ### Design Principles

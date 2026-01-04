@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use std::path::PathBuf;
 
 mod cmd;
 mod daemon;
@@ -112,6 +113,53 @@ enum Commands {
     },
     /// Stop the daemon
     Stop,
+    /// Manage JJ workspaces with timelapse integration
+    #[command(subcommand)]
+    Worktree(WorktreeCommands),
+}
+
+#[derive(Subcommand)]
+enum WorktreeCommands {
+    /// List all workspaces
+    List,
+
+    /// Add a new workspace
+    Add {
+        /// Workspace name
+        name: String,
+
+        /// Custom path (default: ../{repo-name}-{name})
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Start from specific checkpoint
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Don't auto-checkpoint current workspace
+        #[arg(long)]
+        no_checkpoint: bool,
+    },
+
+    /// Remove a workspace
+    Remove {
+        /// Workspace name
+        name: String,
+
+        /// Delete workspace files (not just JJ metadata)
+        #[arg(long)]
+        delete_files: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Switch to a workspace
+    Switch {
+        /// Workspace name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -144,5 +192,17 @@ async fn main() -> Result<()> {
         }
         Commands::Start { foreground } => cmd::start::run(foreground).await,
         Commands::Stop => cmd::stop::run().await,
+        Commands::Worktree(worktree_cmd) => match worktree_cmd {
+            WorktreeCommands::List => cmd::worktree_list::run().await,
+            WorktreeCommands::Add { name, path, from, no_checkpoint } => {
+                cmd::worktree_add::run(&name, path.clone(), from.clone(), no_checkpoint).await
+            }
+            WorktreeCommands::Remove { name, delete_files, yes } => {
+                cmd::worktree_remove::run(&name, delete_files, yes).await
+            }
+            WorktreeCommands::Switch { name } => {
+                cmd::worktree_switch::run(&name).await
+            }
+        },
     }
 }

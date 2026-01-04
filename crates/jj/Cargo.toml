@@ -22,3 +22,6 @@ ulid = { workspace = true }
 blake3 = { workspace = true }
 config = "0.13"
 tempfile = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+walkdir = { workspace = true }

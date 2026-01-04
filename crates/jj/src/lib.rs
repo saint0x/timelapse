@@ -12,11 +12,13 @@
 pub mod mapping;
 pub mod materialize;
 pub mod publish;
+pub mod workspace;
 
 // Re-export public types
 pub use mapping::JjMapping;
 pub use materialize::{CommitMessageOptions, PublishOptions};
 pub use publish::{publish_checkpoint, publish_range};
+pub use workspace::{validate_workspace_name, JjWorkspace, WorkspaceManager, WorkspaceState};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

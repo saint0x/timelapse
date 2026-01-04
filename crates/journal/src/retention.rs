@@ -147,17 +147,20 @@ impl GarbageCollector {
     }
 
     /// Run garbage collection
+    ///
+    /// Optionally accepts workspace checkpoint IDs to protect them from deletion.
     pub fn collect(
         &self,
         journal: &Journal,
         store: &Store,
         pin_manager: &PinManager,
+        workspace_checkpoints: Option<&HashSet<Ulid>>,
     ) -> Result<GcMetrics> {
         let start_time = SystemTime::now();
         let mut metrics = GcMetrics::default();
 
         // Phase 1: Mark live checkpoints
-        let live_checkpoints = self.mark_live_checkpoints(journal, pin_manager)?;
+        let live_checkpoints = self.mark_live_checkpoints(journal, pin_manager, workspace_checkpoints)?;
 
         // Phase 2: Mark live objects (trees and blobs)
         let (live_trees, live_blobs) =
@@ -184,6 +187,7 @@ impl GarbageCollector {
         &self,
         journal: &Journal,
         pin_manager: &PinManager,
+        workspace_checkpoints: Option<&HashSet<Ulid>>,
     ) -> Result<HashSet<Ulid>> {
         let mut live = HashSet::new();
 
@@ -192,11 +196,16 @@ impl GarbageCollector {
             live.extend(pin_manager.get_pinned_checkpoints()?);
         }
 
-        // Criterion 2: Last N checkpoints
+        // Criterion 2: Workspace checkpoints (always protected)
+        if let Some(ws_checkpoints) = workspace_checkpoints {
+            live.extend(ws_checkpoints.iter().copied());
+        }
+
+        // Criterion 3: Last N checkpoints
         let recent = journal.last_n(self.policy.retain_dense_count)?;
         live.extend(recent.iter().map(|cp| cp.id));
 
-        // Criterion 3: Checkpoints within time window
+        // Criterion 4: Checkpoints within time window
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
         let cutoff_ms = now_ms.saturating_sub(self.policy.retain_dense_window_ms);
         let recent_by_time = journal.since(cutoff_ms)?;

@@ -14,3 +14,7 @@ pub mod push;
 pub mod pull;
 pub mod start;
 pub mod stop;
+pub mod worktree_list;
+pub mod worktree_add;
+pub mod worktree_switch;
+pub mod worktree_remove;

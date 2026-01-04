@@ -160,6 +160,7 @@ pub fn display_checkpoint_compact(cp: &Checkpoint, show_ulid: bool) {
         journal::CheckpointReason::Restore => "restore",
         journal::CheckpointReason::Publish => "publish",
         journal::CheckpointReason::GcCompact => "gc",
+        journal::CheckpointReason::WorkspaceSave => "workspace",
     };
 
     if show_ulid {

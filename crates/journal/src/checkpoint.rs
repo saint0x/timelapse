@@ -57,6 +57,8 @@ pub enum CheckpointReason {
     Publish,
     /// GC compact
     GcCompact,
+    /// Workspace save (auto-checkpoint on workspace switch)
+    WorkspaceSave,
 }
 
 impl Checkpoint {
