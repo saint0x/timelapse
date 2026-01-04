@@ -32,21 +32,47 @@ pub async fn run(
     let pin_manager = PinManager::new(&tl_dir);
     let mapping = JjMapping::open(&tl_dir)?;
 
-    // 4. Parse checkpoint reference (support ranges like HEAD~10..HEAD)
+    // 4. Parse checkpoint reference (support ranges like HEAD~10..HEAD or HEAD~10)
     let checkpoints = if checkpoint_ref.contains("..") {
-        // Range syntax
+        // Range syntax (e.g., HEAD~10..HEAD)
         parse_checkpoint_range(checkpoint_ref, &journal, &pin_manager)?
+    } else if checkpoint_ref.contains('~') && !checkpoint_ref.ends_with('~') {
+        // HEAD~N syntax means "from HEAD~N to HEAD"
+        let range = format!("{}..HEAD", checkpoint_ref);
+        parse_checkpoint_range(&range, &journal, &pin_manager)?
     } else {
         // Single checkpoint
         let checkpoint_id = util::resolve_checkpoint_ref(
             checkpoint_ref, &journal, &pin_manager
         )?;
         let cp = journal.get(&checkpoint_id)?
-            .ok_or_else(|| anyhow!("Checkpoint not found"))?;
+            .ok_or_else(|| anyhow!("Checkpoint not found: {}", checkpoint_ref))?;
         vec![cp]
     };
 
-    // 5. Configure publish options
+    // 5. Validate checkpoints not already published (unless compact mode)
+    if !compact {
+        let mut already_published = Vec::new();
+        for cp in &checkpoints {
+            if let Some(jj_commit_id) = mapping.get_jj_commit(cp.id)? {
+                already_published.push((cp.id, jj_commit_id));
+            }
+        }
+
+        if !already_published.is_empty() {
+            println!("{} The following checkpoints are already published:", "Warning:".yellow());
+            for (cp_id, commit_id) in &already_published {
+                let short_cp = &cp_id.to_string()[..8];
+                let short_commit = &commit_id[..12.min(commit_id.len())];
+                println!("  {} → {}", short_cp.yellow(), short_commit.cyan());
+            }
+            println!();
+            println!("{}", "Use --compact to squash into a single commit, or select unpublished checkpoints.".dimmed());
+            anyhow::bail!("Some checkpoints already published");
+        }
+    }
+
+    // 6. Configure publish options
     let mut msg_options = CommitMessageOptions::default();
     if let Some(template) = message_template {
         msg_options.template = Some(template);
@@ -58,8 +84,12 @@ pub async fn run(
         compact_range: compact,
     };
 
-    // 6. Publish checkpoint(s)
-    println!("{}", "Publishing checkpoints to JJ...".dimmed());
+    // 7. Publish checkpoint(s)
+    if checkpoints.len() >= 6 {
+        println!("{}", format!("Publishing {} checkpoints to JJ...", checkpoints.len()).dimmed());
+    } else {
+        println!("{}", "Publishing checkpoints to JJ...".dimmed());
+    }
 
     let commit_ids = publish::publish_range(
         checkpoints.clone(),
@@ -69,27 +99,33 @@ pub async fn run(
         &publish_options,
     )?;
 
-    // 7. Create bookmark if specified
+    // 8. Create bookmark if specified
     if let Some(bookmark_name) = bookmark {
         let bookmark = format!("snap/{}", bookmark_name);
         let last_commit_id = commit_ids.last().unwrap();
 
-        std::process::Command::new("jj")
+        let output = std::process::Command::new("jj")
             .current_dir(&repo_root)
             .args(&["bookmark", "create", &bookmark, "-r", last_commit_id])
-            .status()?;
+            .output()
+            .context("Failed to create JJ bookmark")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to create bookmark '{}': {}", bookmark, stderr);
+        }
 
         println!("{} Created bookmark: {}", "✓".green(), bookmark.yellow());
     }
 
-    // 8. Auto-pin if configured
+    // 9. Auto-pin if configured
     if !no_pin {
         for checkpoint in &checkpoints {
             pin_manager.pin("published", checkpoint.id)?;
         }
     }
 
-    // 9. Display results
+    // 10. Display results
     println!();
     println!("{} Published {} checkpoint(s)",
         "✓".green(),

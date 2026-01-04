@@ -34,6 +34,16 @@ pub struct CheckpointMeta {
     pub bytes_removed: u64,
 }
 
+impl Default for CheckpointMeta {
+    fn default() -> Self {
+        Self {
+            files_changed: 0,
+            bytes_added: 0,
+            bytes_removed: 0,
+        }
+    }
+}
+
 /// Reason for creating a checkpoint
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckpointReason {

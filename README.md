@@ -234,37 +234,36 @@ Timelapse is implemented as a Rust workspace with five crates:
 - ✅ Background daemon with event loop and signal handling
 - ✅ Comprehensive test coverage (14 integration tests)
 
-**Phase 5: JJ Integration** 🚧 20% Complete
+**Phase 5: JJ Integration** ✅ Complete
 - ✅ Enhanced init command with automatic git/JJ initialization
 - ✅ Git detection and configuration utilities
 - ✅ JJ initialization helpers (colocated and external modes)
 - ✅ Commit message formatting with tests
-- ⏳ Checkpoint materialization as JJ commits
-- ⏳ Bidirectional mapping (checkpoint ↔ JJ commit)
-- ⏳ Remote sync operations (publish, push, pull)
+- ✅ Checkpoint materialization as JJ commits (publish command)
+- ✅ Bidirectional mapping (checkpoint ↔ JJ commit ID)
+- ✅ Remote sync operations (publish, push, pull)
+- ✅ Enhanced error handling with actionable messages
+- ✅ Comprehensive test coverage (21 JJ-specific unit tests)
+- ✅ Full user documentation (JJ Integration Guide)
 
 ### Roadmap to v1.0
 
-**Current Status:** ✅ Phase 4 Complete - Production Ready
+**Current Status:** ✅ v1.0 Complete - Production Ready
 
 **Completed:**
 - ✅ All core storage primitives (Phase 1)
 - ✅ File system watcher with cross-platform support (Phase 2)
 - ✅ Incremental update algorithm and checkpoint journal (Phase 3)
 - ✅ Full CLI suite (13 commands) and background daemon (Phase 4)
+- ✅ JJ integration with Git interoperability (Phase 5)
 
-**Remaining for v1.0:**
-- JJ integration (Phase 5) — Estimated 20-30h
-  - Checkpoint materialization as JJ commits
-  - Publish/push/pull commands
-  - Bidirectional sync
-
-**Success criteria:** ✅ Met (except JJ integration)
-- ✅ All CLI commands functional
+**Success criteria:** ✅ All Met
+- ✅ All CLI commands functional (13 commands + 3 JJ commands)
 - ✅ < 10ms checkpoint creation (median, 1k-file repo)
 - ✅ Byte-identical restoration
 - ✅ Crash recovery guarantees
 - ✅ Retention policies with pinned checkpoint support
+- ✅ JJ integration (publish, push, pull with bidirectional mapping)
 
 ---
 
@@ -318,11 +317,33 @@ tl restore @{30m-ago}
 
 # Pin important checkpoints
 tl pin @{before-refactor} "working-authentication"
-
-# Publish checkpoint range to Git via JJ
-tl publish @{before-refactor}..@{latest}
-tl push
 ```
+
+### JJ Integration
+
+Publish checkpoints to Jujutsu (JJ) for Git interoperability:
+
+```bash
+# Initialize JJ workspace (one-time setup)
+jj git init
+
+# Publish latest checkpoint to JJ
+tl publish HEAD -b feature-name
+
+# Publish last 5 checkpoints (compact mode - squashed into one commit)
+tl publish HEAD~5 --compact -b feature-name
+
+# Publish range with one commit per checkpoint
+tl publish HEAD~10..HEAD --no-compact -b my-work
+
+# Push to Git remote
+tl push -b feature-name
+
+# Pull from remote and import as checkpoints
+tl pull
+```
+
+See [JJ Integration Guide](docs/jj-integration.md) for complete documentation.
 
 ### Configuration
 
