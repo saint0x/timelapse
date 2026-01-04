@@ -106,12 +106,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 
 /// Publish a single checkpoint to JJ
 ///
-/// This creates a JJ commit from the checkpoint using a temp directory approach:
-/// 1. Materialize checkpoint tree to temp dir
-/// 2. Copy .jj/ directory to temp dir (preserve JJ state)
-/// 3. Run `jj commit` in temp dir
-/// 4. Copy .jj/ back to persist the commit
-/// 5. Store checkpoint ↔ commit mapping
+/// This creates a JJ commit from the checkpoint using native jj-lib APIs.
+/// Delegates to the native implementation in materialize.rs.
 pub fn publish_checkpoint(
     checkpoint: &Checkpoint,
     store: &Store,
@@ -119,59 +115,17 @@ pub fn publish_checkpoint(
     mapping: &JjMapping,
     options: &PublishOptions,
 ) -> Result<String> {
-    // Create temp directory on same filesystem (enables hardlinks)
-    let temp_dir = tempfile::tempdir_in(repo_root)
-        .context("Failed to create temporary directory")?;
+    // Load JJ workspace using native API
+    let mut workspace = crate::load_workspace(repo_root)?;
 
-    // Materialize checkpoint tree to temp dir
-    materialize_checkpoint_to_dir(checkpoint, store, temp_dir.path())?;
-
-    // Copy .jj/ directory to temp (preserve JJ workspace state)
-    let jj_dir = repo_root.join(".jj");
-    let temp_jj_dir = temp_dir.path().join(".jj");
-    copy_dir_all(&jj_dir, &temp_jj_dir)
-        .context("Failed to copy .jj directory")?;
-
-    // Format commit message
-    let commit_message = format_commit_message(checkpoint, &options.message_options);
-
-    // Create JJ commit in temp directory
-    let output = Command::new("jj")
-        .current_dir(temp_dir.path())
-        .args(&["commit", "-m", &commit_message])
-        .output()
-        .context("Failed to execute jj commit")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("JJ commit failed: {}", stderr);
-    }
-
-    // Get the commit ID
-    let commit_id_output = Command::new("jj")
-        .current_dir(temp_dir.path())
-        .args(&["log", "--no-graph", "--limit", "1", "-T", "commit_id"])
-        .output()
-        .context("Failed to get JJ commit ID")?;
-
-    let jj_commit_id = String::from_utf8(commit_id_output.stdout)?
-        .trim()
-        .to_string();
-
-    // Copy .jj/ directory back to repo (persist commit)
-    // Remove old .jj first
-    fs::remove_dir_all(&jj_dir)
-        .context("Failed to remove old .jj directory")?;
-    copy_dir_all(&temp_jj_dir, &jj_dir)
-        .context("Failed to copy .jj directory back")?;
-
-    // Store mapping
-    mapping.set(checkpoint.id, &jj_commit_id)
-        .context("Failed to store checkpoint mapping")?;
-    mapping.set_reverse(&jj_commit_id, checkpoint.id)
-        .context("Failed to store reverse mapping")?;
-
-    Ok(jj_commit_id)
+    // Delegate to native implementation
+    crate::materialize::publish_checkpoint(
+        checkpoint,
+        store,
+        &mut workspace,
+        mapping,
+        options,
+    )
 }
 
 /// Publish a range of checkpoints to JJ
@@ -179,6 +133,8 @@ pub fn publish_checkpoint(
 /// Behavior depends on options.compact_range:
 /// - If true: Create single JJ commit from last checkpoint (squash)
 /// - If false: Create one JJ commit per checkpoint (preserve history)
+///
+/// Delegates to the native implementation in materialize.rs.
 pub fn publish_range(
     checkpoints: Vec<Checkpoint>,
     store: &Store,
@@ -186,23 +142,17 @@ pub fn publish_range(
     mapping: &JjMapping,
     options: &PublishOptions,
 ) -> Result<Vec<String>> {
-    if options.compact_range {
-        // Compact mode: only publish the last checkpoint
-        if let Some(last) = checkpoints.last() {
-            let commit_id = publish_checkpoint(last, store, repo_root, mapping, options)?;
-            Ok(vec![commit_id])
-        } else {
-            Ok(vec![])
-        }
-    } else {
-        // Expand mode: publish each checkpoint
-        let mut commit_ids = Vec::new();
-        for checkpoint in checkpoints {
-            let commit_id = publish_checkpoint(&checkpoint, store, repo_root, mapping, options)?;
-            commit_ids.push(commit_id);
-        }
-        Ok(commit_ids)
-    }
+    // Load JJ workspace using native API
+    let mut workspace = crate::load_workspace(repo_root)?;
+
+    // Delegate to native implementation
+    crate::materialize::publish_range(
+        checkpoints,
+        store,
+        &mut workspace,
+        mapping,
+        options,
+    )
 }
 
 #[cfg(test)]
@@ -258,6 +208,18 @@ mod tests {
         let tree_hash = store.write_tree(&tree)?;
 
         Ok((store, tree_hash))
+    }
+
+    /// Create a test JJ workspace using native jj-lib APIs (no CLI)
+    fn create_test_jj_workspace(path: &Path) -> Result<()> {
+        // Create minimal config
+        let config = config::Config::builder().build()?;
+        let user_settings = jj_lib::settings::UserSettings::from_config(config);
+
+        // Initialize internal git workspace (avoids 'local' backend)
+        jj_lib::workspace::Workspace::init_internal_git(&user_settings, path)?;
+
+        Ok(())
     }
 
     #[test]
@@ -465,20 +427,11 @@ mod tests {
 
     #[test]
     fn test_publish_range_compact_mode() -> Result<()> {
-        // Note: This test requires JJ to be installed
-        if !crate::check_jj_binary().unwrap_or(false) {
-            eprintln!("Skipping test: JJ binary not found");
-            return Ok(());
-        }
-
         let temp_dir = TempDir::new()?;
         let (store, tree_hash) = create_test_store_with_tree(&temp_dir, true)?;
 
-        // Initialize JJ workspace
-        std::process::Command::new("jj")
-            .current_dir(temp_dir.path())
-            .args(&["git", "init"])
-            .output()?;
+        // Initialize JJ workspace using native API
+        create_test_jj_workspace(temp_dir.path())?;
 
         let mapping = JjMapping::open(&temp_dir.path().join(".tl"))?;
 
@@ -505,18 +458,11 @@ mod tests {
 
     #[test]
     fn test_publish_range_expand_mode() -> Result<()> {
-        if !crate::check_jj_binary().unwrap_or(false) {
-            eprintln!("Skipping test: JJ binary not found");
-            return Ok(());
-        }
-
         let temp_dir = TempDir::new()?;
         let (store, tree_hash) = create_test_store_with_tree(&temp_dir, true)?;
 
-        std::process::Command::new("jj")
-            .current_dir(temp_dir.path())
-            .args(&["git", "init"])
-            .output()?;
+        // Initialize JJ workspace using native API
+        create_test_jj_workspace(temp_dir.path())?;
 
         let mapping = JjMapping::open(&temp_dir.path().join(".tl"))?;
 
@@ -545,6 +491,10 @@ mod tests {
     fn test_publish_range_empty_list() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let store = Store::init(temp_dir.path())?;
+
+        // Initialize JJ workspace using native API
+        create_test_jj_workspace(temp_dir.path())?;
+
         let mapping = JjMapping::open(&temp_dir.path().join(".tl"))?;
 
         let options = PublishOptions {
@@ -602,18 +552,11 @@ mod tests {
 
     #[test]
     fn test_publish_checkpoint_with_timestamp() -> Result<()> {
-        if !crate::check_jj_binary().unwrap_or(false) {
-            eprintln!("Skipping test: JJ binary not found");
-            return Ok(());
-        }
-
         let temp_dir = TempDir::new()?;
         let (store, tree_hash) = create_test_store_with_tree(&temp_dir, true)?;
 
-        std::process::Command::new("jj")
-            .current_dir(temp_dir.path())
-            .args(&["git", "init"])
-            .output()?;
+        // Initialize JJ workspace using native API
+        create_test_jj_workspace(temp_dir.path())?;
 
         let mapping = JjMapping::open(&temp_dir.path().join(".tl"))?;
 

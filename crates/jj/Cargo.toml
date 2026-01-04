@@ -25,5 +25,4 @@ tempfile = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 walkdir = { workspace = true }
-git2 = "0.18"
 toml = { workspace = true }

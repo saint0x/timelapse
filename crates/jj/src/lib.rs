@@ -9,6 +9,7 @@
 //! All operations are designed to be configurable via CLI flags to give users
 //! maximum control over behavior.
 
+pub mod git_ops;
 pub mod mapping;
 pub mod materialize;
 pub mod publish;
@@ -78,7 +79,9 @@ pub fn detect_jj_workspace(repo_root: &Path) -> Result<Option<PathBuf>> {
 /// Returns `JjError::InvalidWorkspace` if the workspace cannot be loaded.
 pub fn load_workspace(repo_root: &Path) -> Result<jj_lib::workspace::Workspace> {
     use jj_lib::repo::StoreFactories;
+    use jj_lib::local_working_copy::LocalWorkingCopy;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     // First check if workspace exists
     detect_jj_workspace(repo_root)?
@@ -92,8 +95,18 @@ pub fn load_workspace(repo_root: &Path) -> Result<jj_lib::workspace::Workspace> 
     // Create default store factories
     let store_factories = StoreFactories::default();
 
-    // Create empty working copy factories (use defaults)
-    let working_copy_factories = HashMap::new();
+    // Register the local working copy factory (required for production)
+    let mut working_copy_factories = HashMap::new();
+    working_copy_factories.insert(
+        "local".to_string(),
+        Box::new(|store: &Arc<jj_lib::store::Store>, working_copy_path: &std::path::Path, state_path: &std::path::Path| {
+            Box::new(LocalWorkingCopy::load(
+                store.clone(),
+                working_copy_path.to_path_buf(),
+                state_path.to_path_buf(),
+            )) as Box<dyn jj_lib::working_copy::WorkingCopy>
+        }) as jj_lib::workspace::WorkingCopyFactory,
+    );
 
     // Load the workspace
     let workspace = jj_lib::workspace::Workspace::load(

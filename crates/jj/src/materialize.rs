@@ -174,14 +174,14 @@ pub fn convert_tree_to_jj(
 
         // Write blob to JJ store and get file ID/symlink ID
         let tree_value = match entry.kind {
-            EntryKind::File => {
+            EntryKind::File | EntryKind::ExecutableFile => {
                 // Write file to store
                 let mut cursor = std::io::Cursor::new(&content);
                 let file_id = jj_store.write_file(&repo_path, &mut cursor)
                     .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
 
-                // Check if executable (mode & 0o111 != 0)
-                let executable = entry.mode & 0o111 != 0;
+                // Check if executable
+                let executable = matches!(entry.kind, EntryKind::ExecutableFile) || (entry.mode & 0o111 != 0);
                 TreeValue::File {
                     id: file_id,
                     executable,
@@ -197,6 +197,10 @@ pub fn convert_tree_to_jj(
                     .with_context(|| format!("Failed to write symlink to JJ store: {}", path_str))?;
 
                 TreeValue::Symlink(symlink_id)
+            }
+            EntryKind::Tree => {
+                // Skip tree entries - TreeBuilder handles directory structure automatically
+                continue;
             }
         };
 
@@ -256,11 +260,13 @@ pub fn publish_checkpoint(
         // Parent exists - check if it's published
         if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
             // Parent is published, use it
-            let parent_commit_id = jj_lib::backend::CommitId::from_hex(&jj_commit_id_str)?;
+            let parent_commit_id = jj_lib::backend::CommitId::from_hex(&jj_commit_id_str);
             vec![parent_commit_id]
         } else {
             // Parent not published, use current @
-            vec![Repo::view(mut_repo).get_wc_commit_id(&workspace.workspace_id())?.clone()]
+            let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_id())
+                .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
+            vec![wc_commit_id.clone()]
         }
     } else {
         // Root checkpoint - use root commit as parent
@@ -271,21 +277,24 @@ pub fn publish_checkpoint(
     let commit_message = format_commit_message(checkpoint, &options.message_options);
 
     // Build commit with native API
+    // Convert TreeId to MergedTreeId (single, non-merge tree)
+    let merged_tree_id = jj_lib::backend::MergedTreeId::Legacy(jj_tree_id);
+
     let commit = mut_repo.new_commit(
         &user_settings,
         parent_ids,
-        jj_tree_id,
+        merged_tree_id,
     )
     .set_description(commit_message)
     .write()?;
 
     let commit_id = commit.id().hex();
 
-    // Update working copy pointer
-    mut_repo.set_wc_commit(&workspace.workspace_id(), commit.id().clone())?;
+    // Update working copy pointer (workspace_id() returns &WorkspaceId, so clone it)
+    mut_repo.set_wc_commit(workspace.workspace_id().clone(), commit.id().clone())?;
 
     // Commit transaction (no need to update working copy - it's handled internally)
-    let _committed_tx = tx.commit("publish checkpoint")?;
+    let _committed_tx = tx.commit("publish checkpoint");
 
     // Store bidirectional mapping
     mapping.set(checkpoint.id, &commit_id)

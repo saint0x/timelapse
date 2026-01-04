@@ -1,11 +1,11 @@
-//! Pull from Git remote and optionally import to checkpoints
+//! Pull from Git remote and optionally import to checkpoints (Native Implementation)
 
 use anyhow::{Context, Result};
 use crate::util;
 use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::path::Path;
-use std::process::Command;
+use std::process::Command; // Still needed for jj log, jj file list/show (Phase 4)
 use tl_core::Store;
 
 pub async fn run(
@@ -20,18 +20,12 @@ pub async fn run(
         anyhow::bail!("No JJ workspace found. Run 'jj git init' first.");
     }
 
-    // 3. Run jj git fetch
+    // 3. Fetch using native git API
     println!("{}", "Fetching from Git remote...".dimmed());
-    let output = Command::new("jj")
-        .current_dir(&repo_root)
-        .args(&["git", "fetch"])
-        .output()
-        .context("Failed to execute jj fetch")?;
+    let mut workspace = jj::load_workspace(&repo_root)
+        .context("Failed to load JJ workspace")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("JJ fetch failed: {}", stderr);
-    }
+    jj::git_ops::native_git_fetch(&mut workspace)?;
 
     println!("{} Fetched from remote", "✓".green());
 
