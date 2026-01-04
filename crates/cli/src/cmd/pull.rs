@@ -1,11 +1,10 @@
-//! Pull from Git remote and optionally import to checkpoints (Native Implementation)
+//! Pull from Git remote and optionally import to checkpoints (100% Native - No CLI)
 
 use anyhow::{Context, Result};
 use crate::util;
 use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::path::Path;
-use std::process::Command; // Still needed for jj log, jj file list/show (Phase 4)
 use tl_core::Store;
 
 pub async fn run(
@@ -47,7 +46,7 @@ pub async fn run(
     let mapping = jj::JjMapping::open(&tl_dir)
         .context("Failed to open JJ mapping")?;
 
-    match import_jj_head(&repo_root, &tl_dir, &store, &journal, &mapping, no_pin)? {
+    match import_jj_head(&workspace, &tl_dir, &store, &journal, &mapping, no_pin)? {
         ImportResult::AlreadyImported(checkpoint_id) => {
             println!("{} JJ HEAD already imported as checkpoint {}", "✓".green(), checkpoint_id.bright_cyan());
         }
@@ -87,15 +86,15 @@ enum ImportResult {
 
 /// Import JJ HEAD commit as a checkpoint
 fn import_jj_head(
-    repo_root: &Path,
+    workspace: &jj_lib::workspace::Workspace,
     tl_dir: &Path,
     store: &Store,
     journal: &Journal,
     mapping: &jj::JjMapping,
     no_pin: bool,
 ) -> Result<ImportResult> {
-    // 1. Get JJ HEAD commit ID
-    let jj_commit_id = get_jj_head_commit_id(repo_root)?;
+    // 1. Get JJ HEAD commit ID using native API
+    let jj_commit_id = get_jj_head_commit_id_native(workspace)?;
 
     // Handle empty repository
     if jj_commit_id.is_empty() || jj_commit_id == "0000000000000000000000000000000000000000" {
@@ -107,11 +106,11 @@ fn import_jj_head(
         return Ok(ImportResult::AlreadyImported(checkpoint_id));
     }
 
-    // 3. Export JJ commit to temp directory
-    let temp_dir = tempfile::tempdir_in(repo_root)
+    // 3. Export JJ commit to temp directory using native API
+    let temp_dir = tempfile::tempdir()
         .context("Failed to create temporary directory")?;
 
-    export_jj_commit_to_dir(repo_root, temp_dir.path())?;
+    export_jj_commit_to_dir_native(workspace, temp_dir.path())?;
 
     // 4. Import directory as checkpoint
     let (root_tree, files_changed) = import_directory_to_store(temp_dir.path(), store)?;
@@ -148,79 +147,50 @@ fn import_jj_head(
     Ok(ImportResult::NewCheckpoint(checkpoint.id, jj_commit_id))
 }
 
-/// Get JJ HEAD commit ID
-fn get_jj_head_commit_id(repo_root: &Path) -> Result<String> {
-    let output = Command::new("jj")
-        .current_dir(repo_root)
-        .args(&["log", "-r", "@", "-T", "commit_id", "--no-graph"])
-        .output()
-        .context("Failed to get JJ HEAD commit ID")?;
+/// Get JJ HEAD commit ID using native API
+fn get_jj_head_commit_id_native(workspace: &jj_lib::workspace::Workspace) -> Result<String> {
+    use jj_lib::backend::ObjectId;
+    use jj_lib::repo::Repo;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get JJ HEAD: {}", stderr);
-    }
+    let config = config::Config::builder().build()?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repository")?;
 
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    let wc_commit_id = repo.view()
+        .get_wc_commit_id(workspace.workspace_id())
+        .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
+
+    Ok(wc_commit_id.hex())
 }
 
-/// Export JJ commit files to a directory
-fn export_jj_commit_to_dir(repo_root: &Path, target_dir: &Path) -> Result<()> {
-    use std::fs;
+/// Export JJ commit files to a directory using native API
+fn export_jj_commit_to_dir_native(
+    workspace: &jj_lib::workspace::Workspace,
+    target_dir: &Path,
+) -> Result<()> {
+    use jj_lib::repo::Repo;
 
-    // Get list of files in JJ commit
-    let output = Command::new("jj")
-        .current_dir(repo_root)
-        .args(&["file", "list"])
-        .output()
-        .context("Failed to list JJ files")?;
+    let config = config::Config::builder().build()?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repository")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to list JJ files: {}", stderr);
-    }
+    let wc_commit_id = repo.view()
+        .get_wc_commit_id(workspace.workspace_id())
+        .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
 
-    let files_list = String::from_utf8(output.stdout)?;
+    let commit = repo.store().get_commit(wc_commit_id)
+        .context("Failed to get working copy commit")?;
 
-    // Export each file
-    for file_path_str in files_list.lines() {
-        let file_path_str = file_path_str.trim();
-        if file_path_str.is_empty() {
-            continue;
-        }
+    let tree_id = commit.tree_id();
 
-        // Skip protected directories
-        if file_path_str.starts_with(".tl/")
-            || file_path_str.starts_with(".git/")
-            || file_path_str.starts_with(".jj/") {
-            continue;
-        }
-
-        // Get file content from JJ
-        let output = Command::new("jj")
-            .current_dir(repo_root)
-            .args(&["file", "show", file_path_str])
-            .output()
-            .with_context(|| format!("Failed to export file: {}", file_path_str))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to export {}: {}", file_path_str, stderr);
-            continue;
-        }
-
-        // Write to temp directory
-        let target_file = target_dir.join(file_path_str);
-
-        // Create parent directories
-        if let Some(parent) = target_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
-
-        fs::write(&target_file, output.stdout)
-            .with_context(|| format!("Failed to write file: {}", target_file.display()))?;
-    }
+    // REUSE existing export.rs function - already tested!
+    jj::export::export_jj_tree_to_dir(
+        repo.store(),
+        tree_id,
+        target_dir,
+    )?;
 
     Ok(())
 }

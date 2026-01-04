@@ -9,6 +9,7 @@
 //! All operations are designed to be configurable via CLI flags to give users
 //! maximum control over behavior.
 
+pub mod export;
 pub mod git_ops;
 pub mod mapping;
 pub mod materialize;

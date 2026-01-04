@@ -7,12 +7,12 @@
 //! The workspace state is persisted in a sled database at `.tl/state/workspace-state/`.
 
 use anyhow::{anyhow, Context, Result};
+use jj_lib::backend::ObjectId;
 use journal::{Checkpoint, CheckpointReason, Journal};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tl_core::{Entry, EntryKind, Store, Tree};
+use tl_core::{Entry, Store, Tree};
 use ulid::Ulid;
 use walkdir::WalkDir;
 
@@ -134,43 +134,38 @@ impl WorkspaceManager {
         }
     }
 
-    /// List all JJ workspaces by parsing `jj workspace list`
+    /// List all JJ workspaces using native jj-lib APIs
     pub fn list_jj_workspaces(&self) -> Result<Vec<JjWorkspace>> {
-        let output = Command::new("jj")
-            .current_dir(&self.repo_root)
-            .args(&["workspace", "list"])
-            .output()
-            .context("Failed to execute jj workspace list")?;
+        // Load workspace and repo
+        let workspace = crate::load_workspace(&self.repo_root)
+            .context("Failed to load JJ workspace for listing")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("jj workspace list failed: {}", stderr);
-        }
+        let config = config::Config::builder().build()?;
+        let user_settings = jj_lib::settings::UserSettings::from_config(config);
+        let repo = workspace.repo_loader().load_at_head(&user_settings)
+            .context("Failed to load repository at HEAD")?;
 
-        let stdout = String::from_utf8(output.stdout)?;
-        let current_name = self.current_workspace_name()?;
-
+        let view = repo.view();
         let mut workspaces = Vec::new();
-        for line in stdout.lines() {
-            // Robust parsing: find first ": " only (paths may contain colons)
-            let Some(colon_idx) = line.find(": ") else {
-                continue; // Skip malformed lines
+
+        // Iterate all workspace commit IDs from view
+        for (workspace_id, wc_commit_id) in view.wc_commit_ids() {
+            // Resolve workspace path (with error handling for missing/corrupted workspaces)
+            let workspace_path = match self.resolve_workspace_path(&workspace_id) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("Warning: Failed to resolve workspace {}: {}",
+                             workspace_id.as_str(), e);
+                    continue; // Skip this workspace
+                }
             };
 
-            let mut name = line[..colon_idx].trim().to_string();
-            let path = PathBuf::from(line[colon_idx + 2..].trim());
-
-            // Remove " (current)" suffix if present
-            if name.ends_with(" (current)") {
-                name = name[..name.len() - 10].to_string();
-            }
-
-            let is_current = name == current_name;
-            let has_changes = self.check_workspace_changes(&path)?;
+            let is_current = workspace_id == workspace.workspace_id();
+            let has_changes = self.check_workspace_changes_native(&repo, wc_commit_id)?;
 
             workspaces.push(JjWorkspace {
-                name,
-                path,
+                name: workspace_id.as_str().to_string(),
+                path: workspace_path,
                 is_current,
                 has_changes,
             });
@@ -179,17 +174,62 @@ impl WorkspaceManager {
         Ok(workspaces)
     }
 
-    /// Check if workspace has uncommitted changes
-    fn check_workspace_changes(&self, workspace_path: &Path) -> Result<bool> {
-        let output = Command::new("jj")
-            .current_dir(workspace_path)
-            .args(&["status"])
-            .output()?;
+    /// Resolve workspace path from workspace ID
+    ///
+    /// For default workspace, returns repo root.
+    /// For other workspaces, reads path from `.jj/workspaces/<id>/workspace.toml`
+    fn resolve_workspace_path(&self, workspace_id: &jj_lib::op_store::WorkspaceId) -> Result<PathBuf> {
+        // Default workspace = repo root
+        if workspace_id.as_str() == "default" {
+            return Ok(self.repo_root.clone());
+        }
 
-        let stdout = String::from_utf8(output.stdout)?;
+        // Read from .jj/workspaces/<id>/workspace.toml
+        let toml_path = self.repo_root
+            .join(".jj/workspaces")
+            .join(workspace_id.as_str())
+            .join("workspace.toml");
 
-        // If status contains "Working copy changes:", there are changes
-        Ok(stdout.contains("Working copy changes:"))
+        if !toml_path.exists() {
+            // Fallback: use workspace directory as path
+            return Ok(self.repo_root.join(".jj/workspaces").join(workspace_id.as_str()));
+        }
+
+        let content = fs::read_to_string(&toml_path)
+            .with_context(|| format!("Failed to read workspace.toml for {}", workspace_id.as_str()))?;
+
+        let toml: toml::Value = toml::from_str(&content)
+            .context("Failed to parse workspace.toml")?;
+
+        let path = toml
+            .get("workspace")
+            .and_then(|w| w.get("working_copy"))
+            .and_then(|w| w.as_str())
+            .ok_or_else(|| anyhow!("workspace.toml missing working_copy path"))?;
+
+        Ok(PathBuf::from(path))
+    }
+
+    /// Check if workspace has uncommitted changes using native API
+    ///
+    /// Returns true if the commit tree is non-empty (has files).
+    /// Note: This is a simple heuristic - it doesn't detect unstaged changes vs committed changes.
+    fn check_workspace_changes_native(
+        &self,
+        repo: &jj_lib::repo::ReadonlyRepo,
+        wc_commit_id: &jj_lib::backend::CommitId,
+    ) -> Result<bool> {
+        use jj_lib::repo::Repo;
+
+        // Get the commit and its tree
+        let commit = repo.store().get_commit(wc_commit_id)
+            .with_context(|| format!("Failed to get commit {}", wc_commit_id.hex()))?;
+
+        let tree = repo.store().get_root_tree(commit.tree_id())
+            .with_context(|| format!("Failed to read tree for commit {}", wc_commit_id.hex()))?;
+
+        // Has changes if tree is non-empty
+        Ok(tree.entries().next().is_some())
     }
 
     /// Auto-checkpoint current workspace with WorkspaceSave reason

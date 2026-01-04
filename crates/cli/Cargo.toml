@@ -17,6 +17,10 @@ watcher = { path = "../watcher" }
 journal = { path = "../journal" }
 jj = { path = "../jj" }
 
+# JJ native integration (for pull.rs)
+jj-lib = { workspace = true }
+config = "0.13"
+
 # CLI
 clap = { workspace = true }
 indicatif = { workspace = true }
