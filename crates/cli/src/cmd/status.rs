@@ -2,7 +2,6 @@
 
 use crate::util;
 use anyhow::{Context, Result};
-use journal::Journal;
 use owo_colors::OwoColorize;
 
 pub async fn run() -> Result<()> {
@@ -12,22 +11,24 @@ pub async fn run() -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Check daemon status
-    let daemon_running = crate::daemon::is_running().await;
+    // 2. Ensure daemon is running (auto-start with supervisor)
+    crate::daemon::ensure_daemon_running().await?;
 
-    // 3. Open journal
-    let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    // 3. Connect to daemon with retry
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
+    let mut client = resilient_client.connect_with_retry().await
+        .context("Failed to connect to daemon")?;
 
-    // 4. Get latest checkpoint
-    let latest = journal.latest()?;
+    // 4. Get all data via IPC
+    let status = client.get_status().await?;
+    let latest = client.get_head().await?;
+    let checkpoint_count = client.get_checkpoint_count().await?;
 
     // 5. Get storage stats
-    let checkpoint_count = journal.count();
     let total_size = util::calculate_dir_size(&tl_dir)?;
 
-    // 6. Display output
+    // 5. Display output
     println!("{}", "Repository Status".bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
@@ -36,37 +37,15 @@ pub async fn run() -> Result<()> {
     println!("Repository:    {}", repo_root.display().to_string().cyan());
     println!();
 
-    // Daemon status
-    print!("Daemon:        ");
-    if daemon_running {
-        println!("{}", "Running ✓".green());
-
-        // If daemon is running, try to get detailed status via IPC
-        let socket_path = tl_dir.join("state/daemon.sock");
-        if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
-            if let Ok(status) = client.get_status().await {
-                println!("  PID:         {}", status.pid);
-                println!(
-                    "  Uptime:      {} seconds",
-                    status.uptime_secs
-                );
-                println!(
-                    "  Checkpoints: {} created",
-                    status.checkpoints_created
-                );
-                if let Some(ts) = status.last_checkpoint_time {
-                    println!(
-                        "  Last:        {}",
-                        util::format_relative_time(ts)
-                    );
-                }
-                println!("  Watching:    {} paths", status.watcher_paths);
-            }
-        }
-    } else {
-        println!("{}", "Not running".yellow());
-        println!("  {}", "Tip: Start with 'tl start'".dimmed());
+    // Daemon status (always running since we connected successfully)
+    println!("Daemon:        {}", "Running ✓".green());
+    println!("  PID:         {}", status.pid);
+    println!("  Uptime:      {} seconds", status.uptime_secs);
+    println!("  Checkpoints: {} created", status.checkpoints_created);
+    if let Some(ts) = status.last_checkpoint_time {
+        println!("  Last:        {}", util::format_relative_time(ts));
     }
+    println!("  Watching:    {} paths", status.watcher_paths);
     println!();
 
     // Latest checkpoint
@@ -100,19 +79,6 @@ pub async fn run() -> Result<()> {
     println!("  Checkpoints: {}", checkpoint_count);
     println!("  Total size:  {}", util::format_size(total_size));
     println!();
-
-    // Helpful hints
-    if checkpoint_count == 0 && !daemon_running {
-        println!(
-            "{}",
-            "Tip: Start the daemon to begin tracking changes automatically".dimmed()
-        );
-    } else if !daemon_running {
-        println!(
-            "{}",
-            "Note: Daemon is not running. Automatic checkpoints are paused.".dimmed()
-        );
-    }
 
     Ok(())
 }

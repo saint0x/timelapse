@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use tl_core::store::Store;
 use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, Journal, PathMap};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
@@ -17,6 +18,67 @@ use watcher::Watcher;
 
 /// Flush checkpoint request with response channel
 type FlushRequest = oneshot::Sender<Result<Option<String>>>;
+
+/// Supervisor for daemon process - handles crashes and restarts
+pub struct DaemonSupervisor {
+    repo_root: PathBuf,
+    max_restarts: usize,
+    restart_window: Duration,
+}
+
+impl DaemonSupervisor {
+    pub fn new(repo_root: PathBuf) -> Self {
+        Self {
+            repo_root,
+            max_restarts: 5,                           // Max 5 restarts
+            restart_window: Duration::from_secs(60),   // Within 60s window
+        }
+    }
+
+    /// Run daemon under supervision with auto-restart
+    pub async fn run_supervised(self) -> Result<()> {
+        let mut restart_times: Vec<Instant> = Vec::new();
+
+        loop {
+            // Clean old restart times outside window
+            let now = Instant::now();
+            restart_times.retain(|t| now.duration_since(*t) < self.restart_window);
+
+            // Check restart limit
+            if restart_times.len() >= self.max_restarts {
+                tracing::error!(
+                    "Daemon crashed {} times in {}s - giving up",
+                    self.max_restarts,
+                    self.restart_window.as_secs()
+                );
+                anyhow::bail!("Too many daemon crashes");
+            }
+
+            // Start daemon
+            tracing::info!("Starting daemon (supervised)");
+            let result = start_daemon_direct(&self.repo_root).await;
+
+            match result {
+                Ok(()) => {
+                    // Clean shutdown - exit supervisor
+                    tracing::info!("Daemon shutdown cleanly");
+                    break;
+                }
+                Err(e) => {
+                    // Crash - record and restart
+                    tracing::error!("Daemon crashed: {}", e);
+                    restart_times.push(Instant::now());
+
+                    // Brief delay before restart
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tracing::info!("Restarting daemon...");
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
 
 /// Daemon structure
 pub struct Daemon {
@@ -35,6 +97,9 @@ pub struct Daemon {
     flush_rx: mpsc::Receiver<FlushRequest>,
 
     status: Arc<RwLock<DaemonStatus>>,
+
+    // Performance caching
+    checkpoint_count_cache: Arc<AtomicUsize>,
 }
 
 impl Daemon {
@@ -133,6 +198,7 @@ impl Daemon {
                     let status = Arc::clone(&self.status);
                     let shutdown_tx = self.shutdown_tx.clone();
                     let flush_tx = self.flush_tx.clone();
+                    let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
 
                     tokio::spawn(async move {
                         let handler = |request: IpcRequest| async move {
@@ -172,6 +238,60 @@ impl Daemon {
                                         Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
                                         Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
                                     }
+                                }
+                                IpcRequest::GetCheckpoints { limit, offset } => {
+                                    let mut checkpoints = Vec::new();
+                                    let limit = limit.unwrap_or(20);
+                                    let offset = offset.unwrap_or(0);
+
+                                    // Walk journal from HEAD backwards
+                                    let mut current_id = match journal.latest() {
+                                        Ok(Some(cp)) => Some(cp.id),
+                                        Ok(None) => None,
+                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                    };
+
+                                    let mut count = 0;
+                                    while let Some(id) = current_id {
+                                        if count >= offset + limit {
+                                            break;
+                                        }
+
+                                        match journal.get(&id) {
+                                            Ok(Some(checkpoint)) => {
+                                                if count >= offset {
+                                                    checkpoints.push(checkpoint.clone());
+                                                }
+                                                current_id = checkpoint.parent;
+                                                count += 1;
+                                            }
+                                            Ok(None) => break,
+                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                        }
+                                    }
+
+                                    Ok(IpcResponse::Checkpoints(checkpoints))
+                                }
+                                IpcRequest::GetCheckpointCount => {
+                                    // Use cached count for O(1) performance
+                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+                                    Ok(IpcResponse::CheckpointCount(count))
+                                }
+                                IpcRequest::GetCheckpointBatch(ids) => {
+                                    // Batch fetch multiple checkpoints in one IPC call
+                                    let mut results = Vec::with_capacity(ids.len());
+
+                                    for id_str in ids {
+                                        match Ulid::from_string(&id_str) {
+                                            Ok(id) => {
+                                                let checkpoint = journal.get(&id).ok().flatten();
+                                                results.push(checkpoint);
+                                            }
+                                            Err(_) => results.push(None),
+                                        }
+                                    }
+
+                                    Ok(IpcResponse::CheckpointBatch(results))
                                 }
                                 IpcRequest::Shutdown => {
                                     // Signal shutdown
@@ -243,6 +363,9 @@ impl Daemon {
 
         // Append to journal
         self.journal.append(&checkpoint)?;
+
+        // Update checkpoint count cache atomically
+        self.checkpoint_count_cache.fetch_add(1, Ordering::Relaxed);
 
         // Update pathmap (atomic swap)
         self.pathmap = new_map;
@@ -344,10 +467,22 @@ pub async fn ensure_daemon_running() -> Result<()> {
     )
 }
 
-/// Start the Timelapse daemon
-pub async fn start() -> Result<()> {
-    // 1. Find repository root
+/// Start the Timelapse daemon (public entry point)
+pub async fn start(supervised: bool) -> Result<()> {
     let repo_root = util::find_repo_root()?;
+
+    if supervised {
+        // Run under supervisor
+        let supervisor = DaemonSupervisor::new(repo_root);
+        supervisor.run_supervised().await
+    } else {
+        // Direct start (existing logic)
+        start_daemon_direct(&repo_root).await
+    }
+}
+
+/// Start daemon directly without supervision (internal)
+async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
     let tl_dir = repo_root.join(".tl");
 
     // 2. Check if already running
@@ -388,6 +523,10 @@ pub async fn start() -> Result<()> {
         watcher_paths: 0,
     }));
 
+    // Initialize checkpoint count cache
+    let initial_count = journal.count();
+    let checkpoint_count_cache = Arc::new(AtomicUsize::new(initial_count));
+
     // 7. Start IPC server
     let socket_path = tl_dir.join("state/daemon.sock");
     let ipc_server = IpcServer::start(&socket_path)
@@ -407,6 +546,7 @@ pub async fn start() -> Result<()> {
         flush_tx,
         flush_rx,
         status,
+        checkpoint_count_cache,
     };
 
     daemon.run().await?;

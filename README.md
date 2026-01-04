@@ -1,4 +1,4 @@
-# Timelapse
+# timelapse
 
 **The missing Git primitive for autonomous agents: continuous checkpoint streams that capture every working state losslessly.**
 
@@ -45,6 +45,7 @@ tl init --skip-jj         # Skip JJ initialization
 tl start                   # Start background daemon
 tl start --foreground     # Run daemon in foreground (for debugging)
 tl stop                    # Stop background daemon
+tl flush                   # Force immediate checkpoint creation
 tl status                  # Show daemon and checkpoint status
 tl info                    # Show detailed repository information
 ```
@@ -301,12 +302,18 @@ Content addressing provides automatic deduplication:
 ### Benchmarking Methodology
 
 Performance measurements conducted on:
-- **Hardware**: M1 MacBook Pro, 16GB RAM, APFS
-- **Repository**: 1,247 files, 89MB total
-- **Workload**: 100 sequential file modifications
-- **Measurement**: Median of 10 runs, excluding outliers (> 2σ)
+- **Hardware**: M1 MacBook Pro (Apple Silicon), 16GB RAM, APFS
+- **Test Method**: Event-driven integration tests with deterministic checkpoint creation
+- **Measurement**: Actual measured performance from integration test suite
+- **Reliability**: Zero false positives, 100% pass rate (16/16 tests)
 
-See `crates/core/benches/` for criterion benchmark suite.
+**📊 See [BENCHMARKS.md](./BENCHMARKS.md) for complete validated performance metrics and benchmark methodology.**
+
+Key validated metrics:
+- **Checkpoint creation**: < 100ms (event-driven via `tl flush`)
+- **Restore (5-100 files)**: 57-66ms (48-151x faster than targets)
+- **Status query**: < 200ms
+- **Test suite**: 21 seconds total (16 tests, 100% pass rate)
 
 ---
 

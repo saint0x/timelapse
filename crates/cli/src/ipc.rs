@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use journal::Checkpoint;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -23,6 +24,15 @@ pub enum IpcRequest {
     FlushCheckpoint,
     /// Request graceful shutdown
     Shutdown,
+    /// Get checkpoints with pagination (for log)
+    GetCheckpoints {
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
+    /// Get total checkpoint count (cached)
+    GetCheckpointCount,
+    /// Get multiple checkpoints in one call (for diff)
+    GetCheckpointBatch(Vec<String>),
 }
 
 /// IPC response from daemon to CLI
@@ -38,6 +48,12 @@ pub enum IpcResponse {
     CheckpointFlushed(Option<String>),
     /// Simple acknowledgment
     Ok,
+    /// List of checkpoints (for pagination)
+    Checkpoints(Vec<Checkpoint>),
+    /// Total checkpoint count
+    CheckpointCount(usize),
+    /// Batch of checkpoints (same order as request, None if not found)
+    CheckpointBatch(Vec<Option<Checkpoint>>),
     /// Error occurred
     Error(String),
 }
@@ -164,6 +180,94 @@ impl IpcClient {
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to FlushCheckpoint"),
         }
+    }
+
+    /// Get checkpoints with pagination (for log command)
+    pub async fn get_checkpoints(&mut self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<Checkpoint>> {
+        let request = IpcRequest::GetCheckpoints { limit, offset };
+        match self.send_request(&request).await? {
+            IpcResponse::Checkpoints(checkpoints) => Ok(checkpoints),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetCheckpoints"),
+        }
+    }
+
+    /// Get total checkpoint count (cached for performance)
+    pub async fn get_checkpoint_count(&mut self) -> Result<usize> {
+        match self.send_request(&IpcRequest::GetCheckpointCount).await? {
+            IpcResponse::CheckpointCount(count) => Ok(count),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetCheckpointCount"),
+        }
+    }
+
+    /// Get multiple checkpoints in one IPC call (for diff command)
+    pub async fn get_checkpoint_batch(&mut self, ids: Vec<String>) -> Result<Vec<Option<Checkpoint>>> {
+        match self.send_request(&IpcRequest::GetCheckpointBatch(ids)).await? {
+            IpcResponse::CheckpointBatch(checkpoints) => Ok(checkpoints),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetCheckpointBatch"),
+        }
+    }
+}
+
+/// Resilient IPC client with automatic retry and exponential backoff
+pub struct ResilientIpcClient {
+    socket_path: std::path::PathBuf,
+    max_retries: usize,
+    initial_backoff: Duration,
+}
+
+impl ResilientIpcClient {
+    pub fn new(socket_path: std::path::PathBuf) -> Self {
+        Self {
+            socket_path,
+            max_retries: 10,
+            initial_backoff: Duration::from_millis(50),
+        }
+    }
+
+    /// Connect with retry and exponential backoff
+    pub async fn connect_with_retry(&self) -> Result<IpcClient> {
+        let mut backoff = self.initial_backoff;
+
+        for attempt in 0..self.max_retries {
+            match IpcClient::connect(&self.socket_path).await {
+                Ok(client) => {
+                    if attempt > 0 {
+                        tracing::debug!("Connected after {} retries", attempt);
+                    }
+                    return Ok(client);
+                }
+                Err(e) => {
+                    if attempt == self.max_retries - 1 {
+                        // Final attempt failed
+                        anyhow::bail!(
+                            "Failed to connect to daemon after {} attempts: {}",
+                            self.max_retries,
+                            e
+                        );
+                    }
+
+                    // Retry with exponential backoff
+                    tracing::debug!(
+                        "Connection attempt {} failed, retrying in {:?}",
+                        attempt + 1,
+                        backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.mul_f32(1.5).min(Duration::from_secs(1));
+                }
+            }
+        }
+
+        unreachable!()
+    }
+
+    /// Send request with automatic reconnect on failure
+    pub async fn send_request_resilient(&self, request: &IpcRequest) -> Result<IpcResponse> {
+        let mut client = self.connect_with_retry().await?;
+        client.send_request(request).await
     }
 }
 

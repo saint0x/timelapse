@@ -64,6 +64,8 @@ zstd = "0.13"
 # Testing and benchmarking
 criterion = "0.5"
 tempfile = "3.10"
+rand = "0.8"
+rand_chacha = "0.3"
 
 [workspace.package]
 version = "0.1.0"

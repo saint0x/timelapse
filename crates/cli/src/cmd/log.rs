@@ -2,8 +2,7 @@
 
 use crate::util;
 use anyhow::{Context, Result};
-use tl_core::{Store, Tree, TreeDiff};
-use journal::Journal;
+use tl_core::{Store, TreeDiff};
 use owo_colors::OwoColorize;
 
 pub async fn run(limit: Option<usize>) -> Result<()> {
@@ -13,52 +12,48 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Open journal and store
-    let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    // 2. Ensure daemon is running (auto-start with supervisor)
+    crate::daemon::ensure_daemon_running().await?;
 
-    let store = Store::open(&repo_root)?;
+    // 3. Connect to daemon with retry
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
+    let mut client = resilient_client.connect_with_retry().await
+        .context("Failed to connect to daemon")?;
 
-    // 3. Get checkpoints (limited)
-    let checkpoint_count = journal.count();
+    // 4. Get checkpoint count via IPC
+    let checkpoint_count = client.get_checkpoint_count().await?;
     if checkpoint_count == 0 {
         println!("{}", "No checkpoints yet".dimmed());
         println!();
-        println!("{}", "Tip: Start the daemon with 'tl start' to begin tracking changes".dimmed());
+        println!("{}", "Tip: Daemon is running and tracking changes automatically".dimmed());
         return Ok(());
     }
 
-    let limit = limit.unwrap_or(20);
-    let mut checkpoints = Vec::new();
+    // 5. Get checkpoints via IPC (batched, single call)
+    let limit_val = limit.unwrap_or(20);
+    let checkpoints = client.get_checkpoints(Some(limit_val), None).await?;
 
-    // Collect checkpoints in reverse order (newest first)
-    let mut current_id = journal.latest()?.map(|cp| cp.id);
-    while let Some(id) = current_id {
-        if checkpoints.len() >= limit {
-            break;
-        }
+    // 6. Open store for tree diffs (read-only, safe)
+    let store = Store::open(&repo_root)?;
 
-        let checkpoint = journal.get(&id)?
-            .context("Checkpoint not found in journal")?;
-
-        current_id = checkpoint.parent;
-        checkpoints.push(checkpoint);
-    }
-
-    // 4. Display each checkpoint with diff summary
+    // 7. Display each checkpoint with diff summary
     println!("{}", "Checkpoint History".bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
 
-    for checkpoint in &checkpoints {
+    for (idx, checkpoint) in checkpoints.iter().enumerate() {
         let id_short = checkpoint.id.to_string()[..8].to_string();
         let time_str = util::format_relative_time(checkpoint.ts_unix_ms);
         let reason = format!("{:?}", checkpoint.reason);
 
         // Calculate diff summary if there's a previous checkpoint
+        // For efficiency, we look at the next checkpoint in our list (parent)
         let diff_summary = if let Some(prev_id) = checkpoint.parent {
-            if let Ok(Some(prev_cp)) = journal.get(&prev_id) {
+            // Try to find parent in already-fetched checkpoints
+            let prev_cp = checkpoints.iter().skip(idx + 1).find(|cp| cp.id == prev_id);
+
+            if let Some(prev_cp) = prev_cp {
                 match (
                     store.read_tree(prev_cp.root_tree),
                     store.read_tree(checkpoint.root_tree)
@@ -137,12 +132,12 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
     }
 
     // Summary
-    if checkpoint_count > limit {
+    if checkpoint_count > limit_val {
         println!(
             "{}",
-            format!("Showing {} of {} total checkpoints", limit, checkpoint_count).dimmed()
+            format!("Showing {} of {} total checkpoints", limit_val, checkpoint_count).dimmed()
         );
-        println!("{}", format!("Use 'tl log --limit {}' to see more", checkpoint_count.min(limit * 2)).dimmed());
+        println!("{}", format!("Use 'tl log --limit {}' to see more", checkpoint_count.min(limit_val * 2)).dimmed());
     } else {
         println!("{}", format!("Total: {} checkpoints", checkpoint_count).dimmed());
     }

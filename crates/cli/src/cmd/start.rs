@@ -5,10 +5,10 @@ use std::time::Duration;
 
 pub async fn run(foreground: bool) -> Result<()> {
     if foreground {
-        // Run daemon in foreground (for debugging)
-        crate::daemon::start().await
+        // Run daemon in foreground (always supervised for production)
+        crate::daemon::start(true).await
     } else {
-        // Start daemon in background
+        // Start daemon in background (always supervised)
         start_background().await
     }
 }
