@@ -6,6 +6,8 @@ use anyhow::Result;
 mod cmd;
 mod daemon;
 mod ipc;
+mod locks;
+mod util;
 
 /// Timelapse - Lossless checkpoint stream for your code
 #[derive(Parser)]
@@ -64,6 +66,14 @@ enum Commands {
     },
     /// Pull from Git via JJ
     Pull,
+    /// Start the daemon
+    Start {
+        /// Run in foreground (for debugging)
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the daemon
+    Stop,
 }
 
 #[tokio::main]
@@ -88,5 +98,7 @@ async fn main() -> Result<()> {
         Commands::Publish { checkpoint } => cmd::publish::run(&checkpoint).await,
         Commands::Push { bookmark } => cmd::push::run(&bookmark).await,
         Commands::Pull => cmd::pull::run().await,
+        Commands::Start { foreground } => cmd::start::run(foreground).await,
+        Commands::Stop => cmd::stop::run().await,
     }
 }
