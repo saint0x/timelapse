@@ -30,7 +30,6 @@ Cargo.lock
 # Test artifacts and working files
 test-file.txt
 test-repo/
-tl-client.sh
 TL-CLIENT-GUIDE.md
 STATUS.md
 PLAN.md
