@@ -6,7 +6,7 @@ use tl_core::{Store, TreeDiff};
 use owo_colors::OwoColorize;
 use std::path::Path;
 
-pub async fn run(checkpoint_a: &str, checkpoint_b: &str) -> Result<()> {
+pub async fn run(checkpoint_a: &str, checkpoint_b: &str, patch: bool, context: usize, max_files: usize) -> Result<()> {
     // 1. Find repository root
     let repo_root = util::find_repo_root()
         .context("Failed to find repository")?;
@@ -97,6 +97,57 @@ pub async fn run(checkpoint_a: &str, checkpoint_b: &str) -> Result<()> {
             diff.modified.len().to_string().yellow()
         ).dimmed()
     );
+
+    // Line-by-line diff if --patch flag is set
+    if patch && !diff.modified.is_empty() {
+        println!();
+        println!("{}", "Detailed Diffs".bold());
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!();
+
+        let modified_to_show = diff.modified.iter().take(max_files);
+        let mut shown = 0;
+
+        for (path, old_entry, new_entry) in modified_to_show {
+            let path_str = std::str::from_utf8(path).unwrap_or("<invalid utf8>");
+
+            // Read blob contents
+            let old_content = store.blob_store().read_blob(old_entry.blob_hash)?;
+            let new_content = store.blob_store().read_blob(new_entry.blob_hash)?;
+
+            // Check for binary files
+            if crate::diff_utils::is_binary(&old_content) || crate::diff_utils::is_binary(&new_content) {
+                println!("  {} {} (binary file)", "~".yellow(), path_str);
+                println!();
+                shown += 1;
+                continue;
+            }
+
+            // Generate and display diff
+            println!("  {} {}", "~".yellow(), path_str);
+            println!();
+            let diff_output = crate::diff_utils::generate_unified_diff(
+                &old_content,
+                &new_content,
+                path_str,
+                context,
+            );
+            println!("{}", diff_output);
+            println!();
+            shown += 1;
+        }
+
+        if diff.modified.len() > max_files {
+            println!(
+                "{}",
+                format!(
+                    "(showing first {} of {} modified files)",
+                    shown,
+                    diff.modified.len()
+                ).dimmed()
+            );
+        }
+    }
 
     Ok(())
 }

@@ -9,7 +9,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-pub async fn run(checkpoint: &str) -> Result<()> {
+pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     // 1. Find repository root
     let repo_root = util::find_repo_root()
         .context("Failed to find repository")?;
@@ -40,18 +40,24 @@ pub async fn run(checkpoint: &str) -> Result<()> {
     println!("Checkpoint: {} {}", id_short.yellow(), util::format_relative_time(cp.ts_unix_ms).dimmed());
     println!("Files:      {}", tree.len());
     println!();
-    println!("{}", "⚠️  Warning: This will overwrite your current working directory!".red().bold());
-    println!();
 
-    print!("Continue? [y/N] ");
-    std::io::stdout().flush()?;
+    // Conditional confirmation
+    if !skip_confirm {
+        println!("{}", "⚠️  Warning: This will overwrite your current working directory!".red().bold());
+        println!();
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
+        print!("Continue? [y/N] ");
+        std::io::stdout().flush()?;
 
-    if !input.trim().eq_ignore_ascii_case("y") {
-        println!("{}", "Restore cancelled".yellow());
-        return Ok(());
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", "Restore cancelled".yellow());
+            return Ok(());
+        }
+    } else {
+        println!("{}", "⚠️  Restoring without confirmation (--yes flag)".yellow());
     }
 
     println!();

@@ -3,7 +3,10 @@
 use crate::util;
 use anyhow::{Context, Result};
 use tl_core::{Store, TreeDiff};
+use journal::PinManager;
 use owo_colors::OwoColorize;
+use std::collections::HashMap;
+use ulid::Ulid;
 
 pub async fn run(limit: Option<usize>) -> Result<()> {
     // 1. Find repository root
@@ -34,6 +37,14 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
 
     // 5. Open store for tree diffs (read-only, safe)
     let store = Store::open(&repo_root)?;
+
+    // 5.5. Load all pins and create reverse mapping (checkpoint → pin names)
+    let pin_manager = PinManager::new(&tl_dir);
+    let all_pins = pin_manager.list_pins()?;
+    let mut pins_by_checkpoint: HashMap<Ulid, Vec<String>> = HashMap::new();
+    for (name, id) in all_pins {
+        pins_by_checkpoint.entry(id).or_default().push(name);
+    }
 
     // 6. Display each checkpoint with diff summary
     println!("{}", "Checkpoint History".bold());
@@ -86,7 +97,7 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
         if let Some((added, removed, modified)) = diff_summary {
             let total = added + removed + modified;
             if total == 0 {
-                println!("{}", "no changes".dimmed());
+                print!("{}", "no changes".dimmed());
             } else {
                 let mut parts = Vec::new();
                 if modified > 0 {
@@ -98,11 +109,21 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
                 if removed > 0 {
                     parts.push(format!("{} removed", removed));
                 }
-                println!("{}", parts.join(", "));
+                print!("{}", parts.join(", "));
             }
         } else {
-            println!("{}", checkpoint.meta.files_changed);
+            print!("{}", checkpoint.meta.files_changed);
         }
+
+        // Display pin names if any
+        if let Some(pin_names) = pins_by_checkpoint.get(&checkpoint.id) {
+            let mut sorted_names = pin_names.clone();
+            sorted_names.sort();
+            let pins_display = sorted_names.join(", ");
+            print!("   📌 {}", pins_display.cyan());
+        }
+
+        println!(); // Complete the header line
 
         // Show changed paths (up to 3)
         if !checkpoint.touched_paths.is_empty() {

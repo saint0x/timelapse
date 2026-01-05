@@ -7,6 +7,7 @@ use std::path::PathBuf;
 mod cmd;
 mod daemon;
 mod data_access;
+mod diff_utils;
 mod ipc;
 mod locks;
 mod util;
@@ -48,11 +49,23 @@ enum Commands {
         checkpoint_a: String,
         /// Second checkpoint ID
         checkpoint_b: String,
+        /// Show line-by-line diff (default: file list only)
+        #[arg(short = 'p', long)]
+        patch: bool,
+        /// Number of context lines (default: 3)
+        #[arg(short = 'U', long, default_value = "3")]
+        context: usize,
+        /// Maximum files to show line diffs for (default: 10)
+        #[arg(long, default_value = "10")]
+        max_files: usize,
     },
     /// Restore working tree to a checkpoint
     Restore {
         /// Checkpoint ID or label
         checkpoint: String,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Pin a checkpoint with a name
     Pin {
@@ -177,10 +190,10 @@ async fn main() -> Result<()> {
         Commands::Status => cmd::status::run().await,
         Commands::Info => cmd::info::run().await,
         Commands::Log { limit } => cmd::log::run(limit).await,
-        Commands::Diff { checkpoint_a, checkpoint_b } => {
-            cmd::diff::run(&checkpoint_a, &checkpoint_b).await
+        Commands::Diff { checkpoint_a, checkpoint_b, patch, context, max_files } => {
+            cmd::diff::run(&checkpoint_a, &checkpoint_b, patch, context, max_files).await
         }
-        Commands::Restore { checkpoint } => cmd::restore::run(&checkpoint).await,
+        Commands::Restore { checkpoint, yes } => cmd::restore::run(&checkpoint, yes).await,
         Commands::Pin { checkpoint, name } => cmd::pin::run(&checkpoint, &name).await,
         Commands::Unpin { name } => cmd::unpin::run(&name).await,
         Commands::Gc => cmd::gc::run().await,

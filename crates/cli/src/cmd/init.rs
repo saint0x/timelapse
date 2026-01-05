@@ -42,6 +42,27 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     std::fs::create_dir_all(current_dir.join(".tl/logs"))
         .context("Failed to create logs directory")?;
 
+    // Create default .tlignore if it doesn't exist
+    let tlignore_path = current_dir.join(".tlignore");
+    if !tlignore_path.exists() {
+        let tlignore_content = r#"# Timelapse Ignore Patterns
+# Built-in patterns already cover: .tl/, .git/, .jj/, editor temp files
+# Add project-specific patterns here
+
+# Build outputs (examples)
+# /build/
+# /dist/
+# *.log
+
+# Dependencies (if not already covered)
+# /vendor/
+
+# Project-specific
+"#;
+        std::fs::write(&tlignore_path, tlignore_content)
+            .context("Failed to create .tlignore")?;
+    }
+
     // Phase 4.5: Auto-start daemon
     println!();
     println!("{} Starting daemon...", "→".cyan());

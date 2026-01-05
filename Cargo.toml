@@ -57,6 +57,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 walkdir = "2.4"
 hex = "0.4"
+similar = { version = "2.4", features = ["inline"] }
 
 # Compression
 zstd = "0.13"

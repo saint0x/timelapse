@@ -153,6 +153,78 @@ impl IgnoreRules {
             return true;
         }
 
+        // Editor temp files and common build directories
+        if self.matches_editor_temp(&path_str) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if path matches common editor temporary files or build directories
+    ///
+    /// Covers: Vim, Emacs, VS Code, JetBrains, MacOS/Windows system files, common build dirs
+    fn matches_editor_temp(&self, path_str: &str) -> bool {
+        // Extract filename from path
+        let filename = Path::new(path_str)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Vim swap files (.swp, .swo, .swn, .swm)
+        if filename.ends_with(".swp")
+            || filename.ends_with(".swo")
+            || filename.ends_with(".swn")
+            || filename.ends_with(".swm") {
+            return true;
+        }
+
+        // Vim/Emacs backup files (~)
+        if filename.ends_with("~") {
+            return true;
+        }
+
+        // Emacs auto-save files (#*#)
+        if filename.starts_with("#") && filename.ends_with("#") {
+            return true;
+        }
+
+        // Emacs lock files (.#*)
+        if filename.starts_with(".#") {
+            return true;
+        }
+
+        // MacOS system files
+        if filename == ".DS_Store" || filename.starts_with("._") {
+            return true;
+        }
+
+        // Windows system files
+        if filename == "Thumbs.db" || filename == "desktop.ini" {
+            return true;
+        }
+
+        // IDE and workspace files
+        if filename.ends_with(".code-workspace") || filename.ends_with(".iml") {
+            return true;
+        }
+
+        // Python bytecode
+        if filename.ends_with(".pyc") {
+            return true;
+        }
+
+        // Common IDE and build directories (full path check)
+        if path_str.contains("/.vscode/")
+            || path_str.contains("/.idea/")
+            || path_str.contains("/node_modules/")
+            || path_str.contains("/__pycache__/")
+            || path_str.contains("/.venv/")
+            || path_str.contains("/venv/")
+            || path_str.contains("/target/") {
+            return true;
+        }
+
         false
     }
 
