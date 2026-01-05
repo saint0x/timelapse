@@ -278,19 +278,24 @@ pub fn create_bookmark_native(
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
 
-    // Check if bookmark exists - use as_ref() to convert String to &RefName
-    let view = mut_repo.view();
+    // Get ref name for bookmark operations
     let ref_name: &jj_lib::ref_name::RefName = full_name.as_ref();
-    if view.get_local_bookmark(ref_name).is_present() {
-        anyhow::bail!("Bookmark '{}' already exists", full_name);
-    }
 
-    // Set bookmark target
+    // Check if bookmark exists - if so, we'll update it
+    let view = mut_repo.view();
+    let bookmark_exists = view.get_local_bookmark(ref_name).is_present();
+
+    // Set bookmark target (creates if new, updates if exists)
     mut_repo.set_local_bookmark_target(ref_name, RefTarget::normal(commit_id));
 
-    // Commit transaction
-    tx.commit("Create bookmark")
-        .context("Failed to commit bookmark creation")?;
+    // Commit transaction with appropriate message
+    let commit_msg = if bookmark_exists {
+        "Update bookmark"
+    } else {
+        "Create bookmark"
+    };
+    tx.commit(commit_msg)
+        .context("Failed to commit bookmark operation")?;
 
     Ok(())
 }
