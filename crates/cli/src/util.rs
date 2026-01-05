@@ -263,17 +263,49 @@ pub fn detect_git_repo(path: &Path) -> Result<bool> {
 /// Returns Some((name, email)) if both are found, None otherwise.
 /// Handles malformed configs gracefully by returning None.
 pub fn parse_git_user_config(repo_root: &Path) -> Result<Option<(String, String)>> {
-    let config_path = repo_root.join(".git/config");
+    // Check global configs first, then local (local overrides global)
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
 
-    if !config_path.exists() {
-        return Ok(None);
+    let mut config_paths = Vec::new();
+
+    // Global configs (checked first, can be overridden)
+    if let Some(ref h) = home {
+        config_paths.push(h.join(".config/git/config")); // XDG location
+        config_paths.push(h.join(".gitconfig"));          // Traditional location
     }
 
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None), // Can't read config, gracefully skip
-    };
+    // Local repo config (checked last, overrides global)
+    config_paths.push(repo_root.join(".git/config"));
 
+    let mut name = None;
+    let mut email = None;
+
+    for config_path in &config_paths {
+        if !config_path.exists() {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(config_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let (parsed_name, parsed_email) = parse_git_config_user_section(&content);
+        if parsed_name.is_some() {
+            name = parsed_name;
+        }
+        if parsed_email.is_some() {
+            email = parsed_email;
+        }
+    }
+
+    match (name, email) {
+        (Some(n), Some(e)) => Ok(Some((n, e))),
+        _ => Ok(None),
+    }
+}
+
+fn parse_git_config_user_section(content: &str) -> (Option<String>, Option<String>) {
     let mut in_user_section = false;
     let mut name = None;
     let mut email = None;
@@ -307,10 +339,7 @@ pub fn parse_git_user_config(repo_root: &Path) -> Result<Option<(String, String)
         }
     }
 
-    match (name, email) {
-        (Some(n), Some(e)) => Ok(Some((n, e))),
-        _ => Ok(None),
-    }
+    (name, email)
 }
 
 /// Extract git remotes from .git/config
