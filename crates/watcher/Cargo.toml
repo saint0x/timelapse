@@ -1,0 +1,36 @@
+[package]
+name = "watcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# File watching
+notify = { workspace = true }
+ignore = { workspace = true }  # .gitignore/.tlignore pattern parsing
+
+# Core dependency
+timelapse-core = { path = "../core", package = "core" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }  # For IgnoreConfig serialization
+
+# Concurrency
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+filetime = "0.2"

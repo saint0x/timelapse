@@ -1,0 +1,39 @@
+[package]
+name = "journal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Embedded database
+sled = { workspace = true }
+
+# Core dependency
+core = { path = "../core" }
+
+# Utilities
+ulid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+owo-colors = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+
+# Data structures
+ahash = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "checkpoint_bench"
+harness = false

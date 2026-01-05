@@ -1,0 +1,16 @@
+# Cargo configuration for Timelapse project
+# Configured for macOS Apple Silicon (ARM64) with Homebrew at /opt/homebrew
+
+[build]
+# Link against ARM64 OpenSSL and libssh2 from Homebrew
+rustflags = [
+    "-L", "/opt/homebrew/opt/openssl@3/lib",
+    "-L", "/opt/homebrew/opt/libssh2/lib",
+]
+
+[env]
+# OpenSSL configuration for macOS Apple Silicon
+OPENSSL_DIR = "/opt/homebrew/opt/openssl@3"
+
+# Pkg-config paths for ARM64 dependencies
+PKG_CONFIG_PATH = "/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig"

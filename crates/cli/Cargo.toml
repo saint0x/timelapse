@@ -1,0 +1,59 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "cli_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tl"
+path = "src/main.rs"
+
+[dependencies]
+# All timelapse crates
+tl_core = { path = "../core", package = "core" }
+watcher = { path = "../watcher" }
+journal = { path = "../journal" }
+jj = { path = "../jj" }
+
+# JJ native integration (for pull.rs)
+jj-lib = { workspace = true }
+config = "0.13"
+
+# CLI
+clap = { workspace = true }
+indicatif = { workspace = true }
+owo-colors = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# IPC & System
+nix = { version = "0.27", features = ["fs", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+ulid = { workspace = true }
+tempfile = { workspace = true }
+similar = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }

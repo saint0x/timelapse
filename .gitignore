@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Timelapse runtime
+.tl/
+
+# JJ workspace
+.jj/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Test artifacts and working files
+test-file.txt
+test-repo/
+TL-CLIENT-GUIDE.md
+STATUS.md
+PLAN.md
+plan-ascending/
