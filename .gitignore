@@ -17,6 +17,9 @@ Cargo.lock
 # Timelapse runtime
 .tl/
 
+# JJ workspace
+.jj/
+
 # Logs
 *.log
 
