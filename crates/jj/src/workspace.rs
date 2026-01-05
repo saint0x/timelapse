@@ -7,7 +7,7 @@
 //! The workspace state is persisted in a sled database at `.tl/state/workspace-state/`.
 
 use anyhow::{anyhow, Context, Result};
-use jj_lib::backend::ObjectId;
+use jj_lib::object_id::ObjectId;
 use journal::{Checkpoint, CheckpointReason, Journal};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -140,31 +140,30 @@ impl WorkspaceManager {
         let workspace = crate::load_workspace(&self.repo_root)
             .context("Failed to load JJ workspace for listing")?;
 
-        let config = config::Config::builder().build()?;
-        let user_settings = jj_lib::settings::UserSettings::from_config(config);
-        let repo = workspace.repo_loader().load_at_head(&user_settings)
+        let repo = workspace.repo_loader().load_at_head()
             .context("Failed to load repository at HEAD")?;
 
         let view = repo.view();
         let mut workspaces = Vec::new();
 
         // Iterate all workspace commit IDs from view
-        for (workspace_id, wc_commit_id) in view.wc_commit_ids() {
+        // In 0.36.0, wc_commit_ids() returns (WorkspaceName, CommitId) pairs
+        for (workspace_name, wc_commit_id) in view.wc_commit_ids() {
             // Resolve workspace path (with error handling for missing/corrupted workspaces)
-            let workspace_path = match self.resolve_workspace_path(&workspace_id) {
+            let workspace_path = match self.resolve_workspace_path_from_name(workspace_name.as_str()) {
                 Ok(path) => path,
                 Err(e) => {
                     eprintln!("Warning: Failed to resolve workspace {}: {}",
-                             workspace_id.as_str(), e);
+                             workspace_name.as_str(), e);
                     continue; // Skip this workspace
                 }
             };
 
-            let is_current = workspace_id == workspace.workspace_id();
+            let is_current = workspace_name == workspace.workspace_name();
             let has_changes = self.check_workspace_changes_native(&repo, wc_commit_id)?;
 
             workspaces.push(JjWorkspace {
-                name: workspace_id.as_str().to_string(),
+                name: workspace_name.as_str().to_string(),
                 path: workspace_path,
                 is_current,
                 has_changes,
@@ -174,29 +173,29 @@ impl WorkspaceManager {
         Ok(workspaces)
     }
 
-    /// Resolve workspace path from workspace ID
+    /// Resolve workspace path from workspace name
     ///
     /// For default workspace, returns repo root.
-    /// For other workspaces, reads path from `.jj/workspaces/<id>/workspace.toml`
-    fn resolve_workspace_path(&self, workspace_id: &jj_lib::op_store::WorkspaceId) -> Result<PathBuf> {
+    /// For other workspaces, reads path from `.jj/workspaces/<name>/workspace.toml`
+    fn resolve_workspace_path_from_name(&self, workspace_name: &str) -> Result<PathBuf> {
         // Default workspace = repo root
-        if workspace_id.as_str() == "default" {
+        if workspace_name == "default" {
             return Ok(self.repo_root.clone());
         }
 
-        // Read from .jj/workspaces/<id>/workspace.toml
+        // Read from .jj/workspaces/<name>/workspace.toml
         let toml_path = self.repo_root
             .join(".jj/workspaces")
-            .join(workspace_id.as_str())
+            .join(workspace_name)
             .join("workspace.toml");
 
         if !toml_path.exists() {
             // Fallback: use workspace directory as path
-            return Ok(self.repo_root.join(".jj/workspaces").join(workspace_id.as_str()));
+            return Ok(self.repo_root.join(".jj/workspaces").join(workspace_name));
         }
 
         let content = fs::read_to_string(&toml_path)
-            .with_context(|| format!("Failed to read workspace.toml for {}", workspace_id.as_str()))?;
+            .with_context(|| format!("Failed to read workspace.toml for {}", workspace_name))?;
 
         let toml: toml::Value = toml::from_str(&content)
             .context("Failed to parse workspace.toml")?;
@@ -221,12 +220,12 @@ impl WorkspaceManager {
     ) -> Result<bool> {
         use jj_lib::repo::Repo;
 
-        // Get the commit and its tree
+        // Get the commit
         let commit = repo.store().get_commit(wc_commit_id)
             .with_context(|| format!("Failed to get commit {}", wc_commit_id.hex()))?;
 
-        let tree = repo.store().get_root_tree(commit.tree_id())
-            .with_context(|| format!("Failed to read tree for commit {}", wc_commit_id.hex()))?;
+        // Get tree directly from commit (tree() returns MergedTree directly in 0.36.0)
+        let tree = commit.tree();
 
         // Has changes if tree is non-empty
         Ok(tree.entries().next().is_some())

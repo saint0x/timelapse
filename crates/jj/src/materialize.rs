@@ -8,10 +8,12 @@
 //! All operations support configurable behavior via options structs.
 
 use anyhow::{Context, Result};
-use tl_core::{Store, Tree, EntryKind};
+use jj_lib::backend::CopyId;
+use jj_lib::object_id::ObjectId;
 use journal::Checkpoint;
-use jj_lib::backend::ObjectId;
+use pollster::FutureExt as _;
 use std::path::PathBuf;
+use tl_core::{EntryKind, Store, Tree};
 
 /// Options for commit message formatting
 #[derive(Debug, Clone)]
@@ -170,15 +172,17 @@ pub fn convert_tree_to_jj(
         let content = store.blob_store().read_blob(entry.blob_hash)
             .with_context(|| format!("Failed to read blob for {}", path_str))?;
 
-        // Convert path to RepoPath
-        let repo_path = RepoPath::from_internal_string(path_str);
+        // Convert path to RepoPath (returns Result in 0.36.0)
+        let repo_path = RepoPath::from_internal_string(path_str)
+            .with_context(|| format!("Invalid repo path: {}", path_str))?;
 
-        // Write blob to JJ store and get file ID/symlink ID
+        // Write blob to JJ store and get file ID/symlink ID (async methods need block_on)
         let tree_value = match entry.kind {
             EntryKind::File | EntryKind::ExecutableFile => {
-                // Write file to store
+                // Write file to store (async with block_on)
                 let mut cursor = std::io::Cursor::new(&content);
-                let file_id = jj_store.write_file(&repo_path, &mut cursor)
+                let file_id = jj_store.write_file(repo_path, &mut cursor)
+                    .block_on()
                     .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
 
                 // Check if executable
@@ -186,6 +190,7 @@ pub fn convert_tree_to_jj(
                 TreeValue::File {
                     id: file_id,
                     executable,
+                    copy_id: CopyId::placeholder(), // No copy tracking
                 }
             }
             EntryKind::Symlink => {
@@ -193,8 +198,9 @@ pub fn convert_tree_to_jj(
                 let target = String::from_utf8(content)
                     .context("Symlink target is not valid UTF-8")?;
 
-                // Write symlink to store
-                let symlink_id = jj_store.write_symlink(&repo_path, &target)
+                // Write symlink to store (async with block_on)
+                let symlink_id = jj_store.write_symlink(repo_path, &target)
+                    .block_on()
                     .with_context(|| format!("Failed to write symlink to JJ store: {}", path_str))?;
 
                 TreeValue::Symlink(symlink_id)
@@ -206,11 +212,16 @@ pub fn convert_tree_to_jj(
         };
 
         // Add to tree builder (it handles nested paths automatically)
-        tree_builder.set(RepoPathBuf::from_internal_string(path_str), tree_value);
+        // RepoPathBuf::from_internal_string returns Result in 0.36.0
+        let repo_path_buf = RepoPathBuf::from_internal_string(path_str)
+            .with_context(|| format!("Invalid repo path: {}", path_str))?;
+        tree_builder.set(repo_path_buf, tree_value);
     }
 
     // Write the entire tree hierarchy and return root tree ID
-    let tree_id = tree_builder.write_tree();
+    // write_tree() returns Result in 0.36.0
+    let tree_id = tree_builder.write_tree()
+        .context("Failed to write tree")?;
 
     Ok(tree_id)
 }
@@ -261,25 +272,30 @@ pub fn convert_tree_to_jj_incremental(
             let content = store.blob_store().read_blob(entry.blob_hash)
                 .with_context(|| format!("Failed to read blob for {}", path_str))?;
 
-            let repo_path = RepoPath::from_internal_string(&path_str);
+            // Convert path to RepoPath (returns Result in 0.36.0)
+            let repo_path = RepoPath::from_internal_string(&path_str)
+                .with_context(|| format!("Invalid repo path: {}", path_str))?;
 
             let tree_value = match entry.kind {
                 EntryKind::File | EntryKind::ExecutableFile => {
                     let mut cursor = std::io::Cursor::new(&content);
-                    let file_id = jj_store.write_file(&repo_path, &mut cursor)
+                    let file_id = jj_store.write_file(repo_path, &mut cursor)
+                        .block_on()
                         .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
 
                     let executable = matches!(entry.kind, EntryKind::ExecutableFile) || (entry.mode & 0o111 != 0);
                     TreeValue::File {
                         id: file_id,
                         executable,
+                        copy_id: CopyId::placeholder(), // No copy tracking
                     }
                 }
                 EntryKind::Symlink => {
                     let target = String::from_utf8(content)
                         .context("Symlink target is not valid UTF-8")?;
 
-                    let symlink_id = jj_store.write_symlink(&repo_path, &target)
+                    let symlink_id = jj_store.write_symlink(repo_path, &target)
+                        .block_on()
                         .with_context(|| format!("Failed to write symlink to JJ store: {}", path_str))?;
 
                     TreeValue::Symlink(symlink_id)
@@ -290,16 +306,21 @@ pub fn convert_tree_to_jj_incremental(
                 }
             };
 
-            tree_builder.set(RepoPathBuf::from_internal_string(path_str.clone()), tree_value);
+            // Create RepoPathBuf for tree_builder (returns Result in 0.36.0)
+            let repo_path_buf = RepoPathBuf::from_internal_string(&path_str)
+                .with_context(|| format!("Invalid repo path: {}", path_str))?;
+            tree_builder.set(repo_path_buf, tree_value);
         } else {
             // File doesn't exist in new tree - it was deleted
-            let repo_path = RepoPathBuf::from_internal_string(path_str);
+            let repo_path = RepoPathBuf::from_internal_string(&path_str)
+                .with_context(|| format!("Invalid repo path for deletion: {}", path_str))?;
             tree_builder.remove(repo_path);
         }
     }
 
-    // Write the tree and return
-    let tree_id = tree_builder.write_tree();
+    // Write the tree and return (returns Result in 0.36.0)
+    let tree_id = tree_builder.write_tree()
+        .context("Failed to write tree")?;
     Ok(tree_id)
 }
 
@@ -321,23 +342,16 @@ pub fn publish_checkpoint(
     mapping: &crate::mapping::JjMapping,
     options: &PublishOptions,
 ) -> Result<String> {
-    use jj_lib::settings::UserSettings;
+    use jj_lib::merged_tree::MergedTree;
     use jj_lib::repo::Repo;  // Import trait for methods
-    use jj_lib::backend::MergedTreeId;
 
-    // Get user settings from workspace
-    // Create default settings if workspace doesn't have them
-    let config = config::Config::builder().build()
-        .context("Failed to create config")?;
-    let user_settings = UserSettings::from_config(config);
-
-    // Load the repo at head
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    // Load the repo at head (no longer takes user_settings in 0.36.0)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
-    // Start transaction
-    let mut tx = repo.start_transaction(&user_settings);
-    let mut_repo = tx.mut_repo();
+    // Start transaction (no longer takes user_settings in 0.36.0)
+    let mut tx = repo.start_transaction();
+    let mut_repo = tx.repo_mut();
     let jj_store = Repo::store(mut_repo);
 
     // Load the current checkpoint's tree first (needed for tree diff computation)
@@ -346,20 +360,22 @@ pub fn publish_checkpoint(
 
     // Determine parent commits and get parent's JJ tree for incremental conversion
     // Also track whether we're using true parent (touched_paths valid) or seed fallback (need tree diff)
+    // In 0.36.0: tree_ids() returns &Merge<TreeId>, use as_resolved() to get single tree
     let (parent_ids, parent_jj_tree_id, use_true_parent): (Vec<_>, Option<jj_lib::backend::TreeId>, bool) =
         if let Some(parent_cp_id) = checkpoint.parent {
             // Parent checkpoint exists - check if it's published to JJ
             if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
                 // Parent is published - get its commit and tree
-                let parent_commit_id = jj_lib::backend::CommitId::from_hex(&jj_commit_id_str);
+                // Use hex::decode + CommitId::new to avoid lifetime issues
+                let parent_commit_id = jj_lib::backend::CommitId::new(
+                    hex::decode(&jj_commit_id_str).context("Invalid parent commit hex")?
+                );
 
                 // Try to get parent's tree ID for incremental conversion
                 let parent_tree_id = match jj_store.get_commit(&parent_commit_id) {
                     Ok(parent_commit) => {
-                        match parent_commit.tree_id() {
-                            MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
-                            MergedTreeId::Merge(_) => None, // Merge trees need full conversion
-                        }
+                        // tree_ids() returns &Merge<TreeId>, as_resolved() gives Option<&TreeId>
+                        parent_commit.tree_ids().as_resolved().cloned()
                     }
                     Err(_) => None, // Can't get commit, fall back to full conversion
                 };
@@ -367,17 +383,17 @@ pub fn publish_checkpoint(
                 (vec![parent_commit_id], parent_tree_id, true) // True parent: touched_paths valid
             } else {
                 // Parent not published - use seed tree as fallback (need tree diff)
-                let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_id())
+                let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_name())
                     .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
 
                 let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
-                    let seed_commit_id = jj_lib::backend::CommitId::from_hex(&seed_commit_id_str);
+                    // Use hex::decode + CommitId::new to avoid lifetime issues
+                    let seed_commit_id = jj_lib::backend::CommitId::new(
+                        hex::decode(&seed_commit_id_str).ok()?
+                    );
                     match jj_store.get_commit(&seed_commit_id) {
                         Ok(seed_commit) => {
-                            match seed_commit.tree_id() {
-                                MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
-                                MergedTreeId::Merge(_) => None,
-                            }
+                            seed_commit.tree_ids().as_resolved().cloned()
                         }
                         Err(_) => None,
                     }
@@ -387,13 +403,13 @@ pub fn publish_checkpoint(
         } else {
             // Root checkpoint - try to use seed commit for incremental conversion
             let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
-                let seed_commit_id = jj_lib::backend::CommitId::from_hex(&seed_commit_id_str);
+                // Use hex::decode + CommitId::new to avoid lifetime issues
+                let seed_commit_id = jj_lib::backend::CommitId::new(
+                    hex::decode(&seed_commit_id_str).ok()?
+                );
                 match jj_store.get_commit(&seed_commit_id) {
                     Ok(seed_commit) => {
-                        match seed_commit.tree_id() {
-                            MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
-                            MergedTreeId::Merge(_) => None,
-                        }
+                        seed_commit.tree_ids().as_resolved().cloned()
                     }
                     Err(_) => None,
                 }
@@ -430,24 +446,25 @@ pub fn publish_checkpoint(
     let commit_message = format_commit_message(checkpoint, &options.message_options);
 
     // Build commit with native API
-    // Convert TreeId to MergedTreeId (single, non-merge tree)
-    let merged_tree_id = jj_lib::backend::MergedTreeId::Legacy(jj_tree_id);
+    // In 0.36.0: new_commit takes MergedTree, not MergedTreeId
+    // Create MergedTree::resolved from the single tree ID
+    let merged_tree = MergedTree::resolved(jj_store.clone(), jj_tree_id);
 
     let commit = mut_repo.new_commit(
-        &user_settings,
         parent_ids,
-        merged_tree_id,
+        merged_tree,
     )
     .set_description(commit_message)
     .write()?;
 
     let commit_id = commit.id().hex();
 
-    // Update working copy pointer (workspace_id() returns &WorkspaceId, so clone it)
-    mut_repo.set_wc_commit(workspace.workspace_id().clone(), commit.id().clone())?;
+    // Update working copy pointer (workspace_name() returns &WorkspaceName)
+    mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), commit.id().clone())?;
 
-    // Commit transaction (no need to update working copy - it's handled internally)
-    let _committed_tx = tx.commit("publish checkpoint");
+    // Commit transaction (returns Result in 0.36.0)
+    tx.commit("publish checkpoint")
+        .context("Failed to commit transaction")?;
 
     // Store bidirectional mapping
     mapping.set(checkpoint.id, &commit_id)

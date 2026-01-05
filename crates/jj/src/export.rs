@@ -4,14 +4,15 @@
 //! and materializing it to a filesystem directory.
 
 use anyhow::{Context, Result};
-use jj_lib::backend::{MergedTreeId, TreeValue};
+use jj_lib::backend::TreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::store::Store;
+use pollster::FutureExt as _;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 
 /// Export a JJ tree to a target directory
 ///
@@ -20,7 +21,7 @@ use std::sync::Arc;
 ///
 /// # Arguments
 /// * `jj_store` - JJ store for reading tree and blob data
-/// * `tree_id` - Root tree ID (MergedTreeId) to export
+/// * `tree` - MergedTree to export
 /// * `target_dir` - Directory to write files to
 ///
 /// # Behavior
@@ -30,26 +31,22 @@ use std::sync::Arc;
 /// - Skips .tl/, .git/, .jj/ directories
 pub fn export_jj_tree_to_dir(
     jj_store: &Arc<Store>,
-    tree_id: &MergedTreeId,
+    tree: &MergedTree,
     target_dir: &Path,
 ) -> Result<()> {
-    // Read the root tree
-    let tree = jj_store.get_root_tree(tree_id)
-        .with_context(|| format!("Failed to read tree"))?;
-
     // Export recursively
-    export_tree_entries(jj_store, &tree, target_dir, &RepoPath::root())
+    export_tree_entries(jj_store, tree, target_dir, &RepoPath::root())
 }
 
-/// Recursively export tree entries to filesystem
+/// Export tree entries to filesystem
 fn export_tree_entries(
     jj_store: &Arc<Store>,
     tree: &MergedTree,
     target_dir: &Path,
     _current_path: &RepoPath,
 ) -> Result<()> {
-    // MergedTree.entries() returns Iterator<Item=(RepoPathBuf, Merge<Option<TreeValue>>)>
-    for (entry_path, merge_value) in tree.entries() {
+    // MergedTree.entries() returns Iterator<Item=(RepoPathBuf, BackendResult<MergedTreeValue>)>
+    for (entry_path, merge_value_result) in tree.entries() {
         let path_str = entry_path.as_internal_file_string();
 
         // Skip protected directories
@@ -59,6 +56,10 @@ fn export_tree_entries(
         {
             continue;
         }
+
+        // Unwrap the backend result
+        let merge_value = merge_value_result
+            .with_context(|| format!("Failed to read tree entry: {}", path_str))?;
 
         // Resolve the merge to get the actual value
         // as_resolved() returns Option<&Option<TreeValue>>
@@ -75,18 +76,20 @@ fn export_tree_entries(
         let file_path = target_dir.join(path_str);
 
         match value {
-            TreeValue::File { id, executable } => {
+            TreeValue::File { id, executable, .. } => {
                 // Create parent directories
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
                 }
 
-                // Read file content
+                // Read file content (async with block_on)
                 let mut content = Vec::new();
                 let mut reader = jj_store.read_file(&entry_path, id)
+                    .block_on()
                     .with_context(|| format!("Failed to read file: {}", path_str))?;
                 reader.read_to_end(&mut content)
+                    .block_on()
                     .context("Failed to read file content")?;
 
                 // Write to filesystem
@@ -105,8 +108,9 @@ fn export_tree_entries(
             TreeValue::Symlink(id) => {
                 #[cfg(unix)]
                 {
-                    // Read symlink target using read_symlink API
+                    // Read symlink target using read_symlink API (async with block_on)
                     let target = jj_store.read_symlink(&entry_path, id)
+                        .block_on()
                         .with_context(|| format!("Failed to read symlink: {}", path_str))?;
 
                     // Create parent directories
@@ -125,23 +129,14 @@ fn export_tree_entries(
                 }
             }
 
-            TreeValue::Tree(subtree_id) => {
-                // Recurse into subdirectory
-                let tree = jj_store.get_tree(&entry_path, subtree_id)
-                    .with_context(|| format!("Failed to read subtree: {}", path_str))?;
-
-                // Wrap Tree in MergedTree for recursion
-                let merged_tree = MergedTree::legacy(tree);
-
-                export_tree_entries(jj_store, &merged_tree, target_dir, &entry_path)?;
+            TreeValue::Tree(_) => {
+                // The entries() iterator handles tree recursion internally,
+                // so we should never see TreeValue::Tree here
+                unreachable!("MergedTree::entries() should not yield Tree values");
             }
 
             TreeValue::GitSubmodule(_) => {
                 eprintln!("Warning: Git submodules not supported, skipping: {}", path_str);
-            }
-
-            TreeValue::Conflict(_) => {
-                eprintln!("Warning: Conflict markers found at {}, skipping", path_str);
             }
         }
     }

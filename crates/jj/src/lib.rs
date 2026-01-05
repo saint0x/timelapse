@@ -35,9 +35,12 @@ pub use merge::{
 pub use publish::{publish_checkpoint, publish_range};
 pub use workspace::{validate_workspace_name, JjWorkspace, WorkspaceManager, WorkspaceState};
 
-use anyhow::{Context, Result};
-use jj_lib::backend::ObjectId;    // For CommitId parsing
+use anyhow::{anyhow, Context, Result};
+use jj_lib::config::StackedConfig;
+use jj_lib::object_id::ObjectId;    // For CommitId parsing
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::Repo;            // For Repo trait methods
+use jj_lib::settings::UserSettings;
 use std::path::{Path, PathBuf};
 
 /// Errors specific to JJ integration
@@ -60,6 +63,13 @@ pub enum JjError {
 
     #[error("JJ operation failed: {0}")]
     OperationFailed(String),
+}
+
+/// Create default UserSettings for jj-lib operations
+pub fn create_user_settings() -> Result<UserSettings> {
+    let config = StackedConfig::with_defaults();
+    UserSettings::from_config(config)
+        .map_err(|e| anyhow!("Failed to create user settings: {}", e))
 }
 
 /// Detect if a JJ workspace exists at the repository root
@@ -95,34 +105,20 @@ pub fn detect_jj_workspace(repo_root: &Path) -> Result<Option<PathBuf>> {
 /// Returns `JjError::InvalidWorkspace` if the workspace cannot be loaded.
 pub fn load_workspace(repo_root: &Path) -> Result<jj_lib::workspace::Workspace> {
     use jj_lib::repo::StoreFactories;
-    use jj_lib::local_working_copy::LocalWorkingCopy;
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     // First check if workspace exists
     detect_jj_workspace(repo_root)?
         .ok_or(JjError::WorkspaceNotFound)?;
 
-    // Create default user settings from empty config
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::InvalidWorkspace(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    // Create default user settings
+    let user_settings = create_user_settings()
+        .map_err(|e| JjError::InvalidWorkspace(format!("Failed to create user settings: {}", e)))?;
 
     // Create default store factories
     let store_factories = StoreFactories::default();
 
-    // Register the local working copy factory (required for production)
-    let mut working_copy_factories = HashMap::new();
-    working_copy_factories.insert(
-        "local".to_string(),
-        Box::new(|store: &Arc<jj_lib::store::Store>, working_copy_path: &std::path::Path, state_path: &std::path::Path| {
-            Box::new(LocalWorkingCopy::load(
-                store.clone(),
-                working_copy_path.to_path_buf(),
-                state_path.to_path_buf(),
-            )) as Box<dyn jj_lib::working_copy::WorkingCopy>
-        }) as jj_lib::workspace::WorkingCopyFactory,
-    );
+    // Use default working copy factories
+    let working_copy_factories = jj_lib::workspace::default_working_copy_factories();
 
     // Load the workspace
     let workspace = jj_lib::workspace::Workspace::load(
@@ -149,9 +145,8 @@ pub fn init_jj_colocated(repo_root: &Path) -> Result<()> {
     use jj_lib::workspace::Workspace;
 
     // Create default user settings
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let user_settings = create_user_settings()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create user settings: {}", e)))?;
 
     // Initialize colocated workspace
     Workspace::init_colocated_git(&user_settings, repo_root)
@@ -177,9 +172,8 @@ pub fn init_jj_external(repo_root: &Path, git_dir: &Path) -> Result<()> {
     use jj_lib::workspace::Workspace;
 
     // Create default user settings
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let user_settings = create_user_settings()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create user settings: {}", e)))?;
 
     // Initialize workspace with external git backend
     Workspace::init_external_git(&user_settings, repo_root, git_dir)
@@ -264,12 +258,8 @@ pub fn create_bookmark_native(
     use jj_lib::backend::CommitId;
     use jj_lib::op_store::RefTarget;
 
-    // Load user settings and repo
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    // Load repo
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
     // Parse commit ID using ObjectId trait
@@ -285,20 +275,22 @@ pub fn create_bookmark_native(
     };
 
     // Start transaction
-    let mut tx = repo.start_transaction(&user_settings);
-    let mut_repo = tx.mut_repo();
+    let mut tx = repo.start_transaction();
+    let mut_repo = tx.repo_mut();
 
-    // Check if bookmark exists (using Repo trait)
-    let view = Repo::view(mut_repo);
-    if view.get_local_branch(&full_name).is_present() {
+    // Check if bookmark exists - use as_ref() to convert String to &RefName
+    let view = mut_repo.view();
+    let ref_name: &jj_lib::ref_name::RefName = full_name.as_ref();
+    if view.get_local_bookmark(ref_name).is_present() {
         anyhow::bail!("Bookmark '{}' already exists", full_name);
     }
 
-    // Set bookmark target (using MutableRepo method)
-    mut_repo.set_local_branch_target(&full_name, RefTarget::normal(commit_id));
+    // Set bookmark target
+    mut_repo.set_local_bookmark_target(ref_name, RefTarget::normal(commit_id));
 
-    // Commit transaction (returns Arc<ReadonlyRepo>, no Result to handle)
-    let _committed_repo = tx.commit("Create bookmark");
+    // Commit transaction
+    tx.commit("Create bookmark")
+        .context("Failed to commit bookmark creation")?;
 
     Ok(())
 }
@@ -364,31 +356,30 @@ pub fn add_workspace_native(
     workspace_name: &str,
     workspace_path: &Path,
 ) -> Result<()> {
+    use jj_lib::ref_name::WorkspaceNameBuf;
     use jj_lib::workspace::Workspace;
 
     // Load main workspace and repo
     let workspace = load_workspace(repo_root)?;
-
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
-    // Use default working copy initializer
-    let working_copy_initializer = jj_lib::workspace::default_working_copy_initializer();
+    // Get the repo path (usually .jj/repo)
+    let repo_path = repo_root.join(".jj/repo");
 
-    // Convert workspace name to WorkspaceId
-    let workspace_id = jj_lib::op_store::WorkspaceId::new(workspace_name.to_string());
+    // Use default working copy factory (not factories hashmap)
+    let working_copy_factory = jj_lib::workspace::default_working_copy_factory();
 
-    // Call the official API with correct parameter order:
-    // init_workspace_with_existing_repo(user_settings, workspace_root, repo, initializer, workspace_id)
+    // Convert workspace name to WorkspaceNameBuf
+    let workspace_name_buf = WorkspaceNameBuf::from(workspace_name.to_string());
+
+    // Call the official API (0.36.0 signature has repo_path as 2nd arg)
     let (_new_workspace, _new_repo) = Workspace::init_workspace_with_existing_repo(
-        &user_settings,
         workspace_path,
+        &repo_path,
         &repo,
-        working_copy_initializer,
-        workspace_id,
+        &*working_copy_factory,
+        workspace_name_buf,
     ).map_err(|e| JjError::OperationFailed(format!("Failed to add workspace: {}", e)))?;
 
     Ok(())
@@ -413,29 +404,26 @@ pub fn forget_workspace_native(
 ) -> Result<()> {
     // Load workspace and repo
     let workspace = load_workspace(repo_root)?;
-
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
-    // Convert to WorkspaceId
-    let ws_id = jj_lib::op_store::WorkspaceId::new(workspace_name.to_string());
+    // Convert to WorkspaceName
+    let ws_name = WorkspaceName::new(workspace_name);
 
     // Check if workspace exists by checking for its wc commit
     let view = Repo::view(repo.as_ref());
-    if view.get_wc_commit_id(&ws_id).is_none() {
+    if view.get_wc_commit_id(ws_name).is_none() {
         anyhow::bail!("Workspace '{}' not found", workspace_name);
     }
 
     // Start transaction to remove workspace
-    let mut tx = repo.start_transaction(&user_settings);
-    tx.mut_repo().remove_wc_commit(&ws_id);
+    let mut tx = repo.start_transaction();
+    tx.repo_mut().remove_wc_commit(ws_name);
 
-    // Commit transaction (returns Arc<ReadonlyRepo>, no Result to handle)
+    // Commit transaction
     let description = format!("forget workspace '{}'", workspace_name);
-    let _committed_repo = tx.commit(&description);
+    tx.commit(&description)
+        .context("Failed to commit workspace removal")?;
 
     Ok(())
 }
@@ -465,50 +453,35 @@ pub fn forget_workspace_native(
 ///
 /// Returns error if workspace loading or commit creation fails.
 pub fn create_seed_commit(repo_root: &Path) -> Result<String> {
-    use jj_lib::backend::MergedTreeId;
-
     // Load workspace
     let workspace = load_workspace(repo_root)?;
-
-    let config = config::Config::builder().build()
-        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
     // Get current @ commit's tree
     let wc_commit_id = Repo::view(repo.as_ref())
-        .get_wc_commit_id(workspace.workspace_id())
+        .get_wc_commit_id(workspace.workspace_name())
         .ok_or_else(|| JjError::OperationFailed("No working copy commit found".to_string()))?;
 
     let jj_store = Repo::store(repo.as_ref());
     let wc_commit = jj_store.get_commit(&wc_commit_id)
         .context("Failed to get working copy commit")?;
 
-    // Get the tree from working copy
-    let tree_id = match wc_commit.tree_id() {
-        MergedTreeId::Legacy(tree_id) => tree_id.clone(),
-        MergedTreeId::Merge(merged) => {
-            // For merged trees, get the first tree (should be the resolved state)
-            merged.first().clone()
-        }
-    };
+    // Get the tree from working copy (tree() returns MergedTree directly in 0.36.0)
+    let tree = wc_commit.tree();
 
     // Create seed commit with:
     // - Same tree as current @ (captures initial state)
     // - JJ root as parent (clean lineage)
     // - Descriptive message
-    let mut tx = repo.start_transaction(&user_settings);
-    let mut_repo = tx.mut_repo();
+    let mut tx = repo.start_transaction();
+    let mut_repo = tx.repo_mut();
 
     let root_commit_id = Repo::store(mut_repo).root_commit_id().clone();
-    let merged_tree_id = MergedTreeId::Legacy(tree_id);
 
     let seed_commit = mut_repo.new_commit(
-        &user_settings,
         vec![root_commit_id],
-        merged_tree_id,
+        tree,
     )
     .set_description("Timelapse seed: initial repository state\n\nThis commit enables fast incremental publishing.")
     .write()?;
@@ -516,7 +489,8 @@ pub fn create_seed_commit(repo_root: &Path) -> Result<String> {
     let commit_id = seed_commit.id().hex();
 
     // Commit the transaction
-    tx.commit("create timelapse seed commit");
+    tx.commit("create timelapse seed commit")
+        .context("Failed to commit seed commit creation")?;
 
     Ok(commit_id)
 }

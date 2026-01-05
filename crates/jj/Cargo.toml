@@ -28,3 +28,6 @@ bincode = { workspace = true }
 walkdir = { workspace = true }
 toml = { workspace = true }
 hex = { workspace = true }
+pollster = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }

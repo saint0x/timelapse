@@ -7,10 +7,15 @@
 //! - Conflict detection and extraction
 
 use anyhow::{anyhow, Context, Result};
-use jj_lib::backend::{CommitId, ObjectId};
+use jj_lib::backend::CommitId;
+use jj_lib::config::StackedConfig;
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::object_id::ObjectId;
+use jj_lib::ref_name::{RefName, RemoteName};
 use jj_lib::repo::Repo;
+use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
+use pollster::FutureExt as _;
 use std::path::Path;
 
 /// Result of a merge operation
@@ -105,13 +110,16 @@ impl MergeState {
     }
 }
 
+/// Create default UserSettings for jj-lib operations
+fn create_user_settings() -> Result<UserSettings> {
+    let config = StackedConfig::with_defaults();
+    UserSettings::from_config(config)
+        .map_err(|e| anyhow!("Failed to create user settings: {}", e))
+}
+
 /// Get a branch's commit ID from the JJ view
 pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<String> {
-    let config = config::Config::builder().build()
-        .map_err(|e| anyhow!("Failed to create config: {}", e))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
@@ -123,14 +131,17 @@ pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<
         format!("snap/{}", branch_name)
     };
 
-    // Get local branch target
-    let target = view.get_local_branch(&full_name);
+    // Get local bookmark target (branches are now called bookmarks)
+    let ref_name: &RefName = full_name.as_ref();
+    let target = view.get_local_bookmark(ref_name);
 
     match target.as_normal() {
         Some(commit_id) => Ok(commit_id.hex()),
         None => {
-            // Try remote branch
-            let remote_ref = view.get_remote_branch(&full_name, "origin");
+            // Try remote bookmark (use RemoteRefSymbol in 0.36.0)
+            let origin_remote: &RemoteName = "origin".as_ref();
+            let remote_symbol = ref_name.to_remote_symbol(origin_remote);
+            let remote_ref = view.get_remote_bookmark(remote_symbol);
             match remote_ref.target.as_normal() {
                 Some(commit_id) => Ok(commit_id.hex()),
                 None => Err(anyhow!("Branch '{}' not found or has no commit", full_name)),
@@ -141,15 +152,11 @@ pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<
 
 /// Get the current working copy commit ID
 pub fn get_current_commit_id(workspace: &Workspace) -> Result<String> {
-    let config = config::Config::builder().build()
-        .map_err(|e| anyhow!("Failed to create config: {}", e))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
-    let wc_id = view.get_wc_commit_id(workspace.workspace_id())
+    let wc_id = view.get_wc_commit_id(workspace.workspace_name())
         .ok_or_else(|| anyhow!("No working copy commit found"))?;
 
     Ok(wc_id.hex())
@@ -157,21 +164,19 @@ pub fn get_current_commit_id(workspace: &Workspace) -> Result<String> {
 
 /// Find the common ancestor (merge base) between two commits
 pub fn find_merge_base(workspace: &Workspace, commit1_hex: &str, commit2_hex: &str) -> Result<Option<String>> {
-    let config = config::Config::builder().build()
-        .map_err(|e| anyhow!("Failed to create config: {}", e))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
-    let commit1_id = CommitId::from_hex(commit1_hex);
-    let commit2_id = CommitId::from_hex(commit2_hex);
+    // Use hex::decode + CommitId::new to avoid lifetime issues with from_hex
+    let commit1_id = CommitId::new(hex::decode(commit1_hex).context("Invalid commit1 hex")?);
+    let commit2_id = CommitId::new(hex::decode(commit2_hex).context("Invalid commit2 hex")?);
 
-    // Use the index to find common ancestors
-    let ancestors = repo.index().common_ancestors(&[commit1_id], &[commit2_id]);
+    // Use the index to find common ancestors (returns Result in 0.36.0)
+    let ancestors = repo.index().common_ancestors(&[commit1_id], &[commit2_id])
+        .context("Failed to compute common ancestors")?;
 
     // Return the first (most recent) common ancestor
-    Ok(ancestors.first().map(|id| id.hex()))
+    Ok(ancestors.first().map(|id: &CommitId| id.hex()))
 }
 
 /// Perform a 3-way merge between current state and target branch
@@ -185,16 +190,12 @@ pub fn find_merge_base(workspace: &Workspace, commit1_hex: &str, commit2_hex: &s
 /// # Returns
 /// MergeResult with merged tree and conflict information
 pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<MergeResult> {
-    let config = config::Config::builder().build()
-        .map_err(|e| anyhow!("Failed to create config: {}", e))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
     // 1. Get current commit ("ours")
     let view = repo.view();
-    let ours_id = view.get_wc_commit_id(workspace.workspace_id())
+    let ours_id = view.get_wc_commit_id(workspace.workspace_name())
         .ok_or_else(|| anyhow!("No working copy commit found"))?
         .clone();
 
@@ -206,12 +207,15 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
             format!("snap/{}", target_branch)
         };
 
-        let target = view.get_local_branch(&full_name);
+        let ref_name: &RefName = full_name.as_ref();
+        let target = view.get_local_bookmark(ref_name);
         match target.as_normal() {
             Some(id) => id.clone(),
             None => {
-                // Try remote branch
-                let remote_ref = view.get_remote_branch(&full_name, "origin");
+                // Try remote bookmark (use RemoteRefSymbol in 0.36.0)
+                let origin_remote: &RemoteName = "origin".as_ref();
+                let remote_symbol = ref_name.to_remote_symbol(origin_remote);
+                let remote_ref = view.get_remote_bookmark(remote_symbol);
                 remote_ref.target.as_normal()
                     .ok_or_else(|| anyhow!("Branch '{}' not found", full_name))?
                     .clone()
@@ -219,8 +223,9 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
         }
     };
 
-    // 3. Find common ancestor ("base")
-    let base_ids = repo.index().common_ancestors(&[ours_id.clone()], &[theirs_id.clone()]);
+    // 3. Find common ancestor ("base") - returns Result in 0.36.0
+    let base_ids = repo.index().common_ancestors(&[ours_id.clone()], &[theirs_id.clone()])
+        .context("Failed to compute common ancestors")?;
     let base_id = base_ids.first().cloned();
 
     // 4. Get commits
@@ -230,25 +235,27 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
     let theirs_commit = store.get_commit(&theirs_id)
         .context("Failed to get 'theirs' commit")?;
 
-    // 5. Get trees
-    let ours_tree = ours_commit.tree()
-        .context("Failed to get 'ours' tree")?;
-    let theirs_tree = theirs_commit.tree()
-        .context("Failed to get 'theirs' tree")?;
+    // 5. Get trees (tree() returns MergedTree directly in 0.36.0)
+    let ours_tree = ours_commit.tree();
+    let theirs_tree = theirs_commit.tree();
 
     // 6. Get base tree (if we have a common ancestor)
-    let merged_tree = if let Some(base_id) = &base_id {
+    // merge() is now async and takes ownership in 0.36.0
+    let merged_tree = if let Some(ref base_id) = base_id {
         let base_commit = store.get_commit(base_id)
             .context("Failed to get base commit")?;
-        let base_tree = base_commit.tree()
-            .context("Failed to get base tree")?;
+        let base_tree = base_commit.tree();
 
-        // Perform 3-way merge using jj-lib
-        base_tree.merge(&ours_tree, &theirs_tree)
+        // Perform 3-way merge using jj-lib (async, clone trees since merge takes ownership)
+        base_tree.clone().merge(ours_tree.clone(), theirs_tree.clone())
+            .block_on()
             .context("Failed to perform 3-way merge")?
     } else {
         // No common ancestor - merge without base (can produce many conflicts)
-        ours_tree.merge(&ours_tree, &theirs_tree)
+        // Clone ours_tree since we use it twice
+        let ours_tree_clone = ours_tree.clone();
+        ours_tree.merge(ours_tree_clone, theirs_tree)
+            .block_on()
             .context("Failed to perform merge without base")?
     };
 
@@ -260,20 +267,26 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
         merged_tree,
         conflicts,
         is_clean,
-        base_commit_id: base_id.map(|id| id.hex()),
+        base_commit_id: base_id.map(|id: CommitId| id.hex()),
         ours_commit_id: ours_id.hex(),
         theirs_commit_id: theirs_id.hex(),
     })
 }
 
 /// Extract conflict information from a merged tree
-fn extract_conflicts(merged_tree: &MergedTree, store: &std::sync::Arc<jj_lib::store::Store>) -> Result<Vec<ConflictInfo>> {
+fn extract_conflicts(merged_tree: &MergedTree, _store: &std::sync::Arc<jj_lib::store::Store>) -> Result<Vec<ConflictInfo>> {
     let mut conflicts = Vec::new();
 
     // Check if tree has any conflicts
     if merged_tree.has_conflict() {
         // Iterate through all entries looking for conflicts
-        for (path, entry) in merged_tree.entries() {
+        // entries() returns (RepoPathBuf, BackendResult<MergedTreeValue>)
+        for (path, entry_result) in merged_tree.entries() {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => continue, // Skip entries that fail to read
+            };
+
             if entry.is_resolved() {
                 continue;
             }
@@ -302,32 +315,25 @@ pub fn create_merge_commit(
     workspace: &mut Workspace,
     parent1_hex: &str,
     parent2_hex: &str,
-    merged_tree: &MergedTree,
+    merged_tree: MergedTree, // Takes ownership of MergedTree
     message: &str,
 ) -> Result<String> {
-    let config = config::Config::builder().build()
-        .map_err(|e| anyhow!("Failed to create config: {}", e))?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
+    let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
-    let parent1_id = CommitId::from_hex(parent1_hex);
-    let parent2_id = CommitId::from_hex(parent2_hex);
+    // Use hex::decode + CommitId::new to avoid lifetime issues with from_hex
+    let parent1_id = CommitId::new(hex::decode(parent1_hex).context("Invalid parent1 hex")?);
+    let parent2_id = CommitId::new(hex::decode(parent2_hex).context("Invalid parent2 hex")?);
 
-    // Start transaction
-    let mut tx = repo.start_transaction(&user_settings);
+    // Start transaction (no longer takes user_settings)
+    let mut tx = repo.start_transaction();
 
-    // Get MergedTreeId from MergedTree
-    let merged_tree_id = merged_tree.id();
-
-    // Create the merge commit
-    // Note: We use new_commit with multiple parent IDs
-    let new_commit = tx.mut_repo()
+    // Create the merge commit with multiple parents
+    // new_commit now takes MergedTree directly instead of tree ID
+    let new_commit = tx.repo_mut()
         .new_commit(
-            &user_settings,
             vec![parent1_id, parent2_id],
-            merged_tree_id,
+            merged_tree,
         )
         .set_description(message)
         .write()
@@ -335,8 +341,9 @@ pub fn create_merge_commit(
 
     let new_commit_id = new_commit.id().hex();
 
-    // Commit transaction
-    tx.commit("create merge commit");
+    // Commit transaction (now returns Result)
+    tx.commit("create merge commit")
+        .context("Failed to commit transaction")?;
 
     Ok(new_commit_id)
 }

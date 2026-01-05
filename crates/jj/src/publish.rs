@@ -211,9 +211,11 @@ mod tests {
 
     /// Create a test JJ workspace using native jj-lib APIs (no CLI)
     fn create_test_jj_workspace(path: &Path) -> Result<()> {
-        // Create minimal config
-        let config = config::Config::builder().build()?;
-        let user_settings = jj_lib::settings::UserSettings::from_config(config);
+        use jj_lib::config::StackedConfig;
+
+        // Create minimal config using StackedConfig (required in 0.36.0)
+        let config = StackedConfig::with_defaults();
+        let user_settings = jj_lib::settings::UserSettings::from_config(config)?;
 
         // Initialize internal git workspace (avoids 'local' backend)
         jj_lib::workspace::Workspace::init_internal_git(&user_settings, path)?;

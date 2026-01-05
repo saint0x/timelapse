@@ -603,13 +603,23 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
     let log_file_writer = std::fs::File::create(&log_file)
         .context("Failed to create log file")?;
 
-    Command::new("nohup")
-        .arg(&exe)
+    let mut cmd = Command::new("nohup");
+    cmd.arg(&exe)
         .arg("start")
         .arg("--foreground")
         .stdout(log_file_writer.try_clone()?)
-        .stderr(log_file_writer)
-        .spawn()
+        .stderr(log_file_writer);
+
+    // Pass SSH agent environment variables so daemon can authenticate
+    // These are needed for git operations (push/pull) via JJ
+    if let Ok(ssh_auth_sock) = std::env::var("SSH_AUTH_SOCK") {
+        cmd.env("SSH_AUTH_SOCK", ssh_auth_sock);
+    }
+    if let Ok(ssh_agent_pid) = std::env::var("SSH_AGENT_PID") {
+        cmd.env("SSH_AGENT_PID", ssh_agent_pid);
+    }
+
+    cmd.spawn()
         .context("Failed to spawn daemon process")?;
 
     Ok(())

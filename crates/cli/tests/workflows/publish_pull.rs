@@ -28,45 +28,49 @@ async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
 /// Create a JJ commit using native jj-lib APIs
 fn create_jj_commit_native(root: &std::path::Path, message: &str) -> Result<()> {
     use jj_lib::repo::Repo;
+    use jj_lib::merged_tree::MergedTree;
 
     let workspace = jj::load_workspace(root)?;
-
-    let config = config::Config::builder().build()?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-    let repo = workspace.repo_loader().load_at_head(&user_settings)?;
+    let repo = workspace.repo_loader().load_at_head()?;
 
     // Get current working copy commit
     let wc_commit_id = repo.view()
-        .get_wc_commit_id(workspace.workspace_id())
+        .get_wc_commit_id(workspace.workspace_name())
         .ok_or_else(|| anyhow::anyhow!("No working copy commit"))?;
 
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    // Start transaction to create new commit
-    let mut tx = repo.start_transaction(&user_settings);
+    // Start transaction to create new commit (no longer takes user_settings)
+    let mut tx = repo.start_transaction();
 
     // Create new commit with the working copy tree
-    let new_commit = tx.mut_repo()
+    // tree() returns MergedTree directly in 0.36.0
+    let tree = wc_commit.tree();
+    let new_commit = tx.repo_mut()
         .new_commit(
-            &user_settings,
             vec![wc_commit.id().clone()],
-            wc_commit.tree_id().clone(),
+            tree.clone(),
         )
         .set_description(message)
         .write()?;
 
     // Update working copy to point to new empty commit
-    let new_wc_commit = tx.mut_repo()
+    // Create empty tree using MergedTree::resolved with empty_tree_id
+    let empty_tree = MergedTree::resolved(
+        repo.store().clone(),
+        repo.store().empty_tree_id().clone(),
+    );
+    let new_wc_commit = tx.repo_mut()
         .new_commit(
-            &user_settings,
             vec![new_commit.id().clone()],
-            repo.store().empty_merged_tree_id(),
+            empty_tree,
         )
         .write()?;
 
-    tx.mut_repo().set_wc_commit(workspace.workspace_id().clone(), new_wc_commit.id().clone())?;
+    tx.repo_mut().set_wc_commit(workspace.workspace_name().to_owned(), new_wc_commit.id().clone())?;
 
-    tx.commit(&format!("commit: {}", message));
+    // commit() now returns Result
+    tx.commit(&format!("commit: {}", message))?;
 
     Ok(())
 }
