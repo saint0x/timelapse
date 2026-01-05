@@ -71,12 +71,16 @@ cmd_release() {
 }
 
 cmd_install() {
-    print_header "Installing release binary to ~/.cargo/bin"
+    print_header "Installing release binary"
     start_timer
     cargo build --release
-    cargo install --path crates/cli --force
+
+    # Create symlink in ~/.local/bin
+    mkdir -p ~/.local/bin
+    ln -sf "$(pwd)/target/aarch64-apple-darwin/release/tl" ~/.local/bin/tl
+
     end_timer
-    print_success "Installed to ~/.cargo/bin/tl"
+    print_success "Installed: ~/.local/bin/tl -> release binary"
 
     # Verify
     if command -v tl &>/dev/null; then
@@ -85,7 +89,7 @@ cmd_install() {
     else
         echo ""
         print_error "tl not found in PATH. Add to your shell config:"
-        echo '  export PATH="$HOME/.cargo/bin:$PATH"'
+        echo '  export PATH="$HOME/.local/bin:$PATH"'
     fi
 }
 
@@ -97,9 +101,12 @@ cmd_clean() {
 
 cmd_info() {
     print_header "Build Info"
-    echo "Current tl in PATH:"
+    echo "System tl:"
     if command -v tl &>/dev/null; then
         print_info "Location: $(which tl)"
+        if [ -L "$(which tl)" ]; then
+            print_info "Symlink:  $(readlink "$(which tl)")"
+        fi
         print_info "Version:  $(tl --version)"
     else
         print_warning "tl not found in PATH"
@@ -108,8 +115,6 @@ cmd_info() {
     echo "Local builds:"
     [ -f "target/aarch64-apple-darwin/release/tl" ] && print_info "Release: target/aarch64-apple-darwin/release/tl"
     [ -f "target/aarch64-apple-darwin/debug/tl" ] && print_info "Debug:   target/aarch64-apple-darwin/debug/tl"
-    [ -f "target/release/tl" ] && print_info "Release: target/release/tl"
-    [ -f "target/debug/tl" ] && print_info "Debug:   target/debug/tl"
 }
 
 # =============================================================================
@@ -126,7 +131,7 @@ show_usage() {
     echo "  check      Fast compilation check (no codegen)"
     echo "  debug      Build debug binary (fast, unoptimized)"
     echo "  release    Build release binary (slow, optimized)"
-    echo "  install    Build release + install to ~/.cargo/bin"
+    echo "  install    Build release + symlink to ~/.local/bin"
     echo "  clean      Remove build artifacts"
     echo "  info       Show current tl binary info"
     echo ""
