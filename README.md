@@ -104,19 +104,65 @@ tl init
 
 ## Architecture
 
-### How It Works
-
 ```
-File Changes → Watcher → Debouncer → Checkpoint Creation → Storage
-                                            ↓
-                                    JJ Integration → Git Remote
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              TIMELAPSE                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐         ┌──────────────────────────────────────────┐     │
+│   │   CLI (tl)   │         │           Background Daemon              │     │
+│   ├──────────────┤         ├──────────────────────────────────────────┤     │
+│   │ init         │         │                                          │     │
+│   │ log          │◄───────►│  ┌─────────────┐    ┌────────────────┐   │     │
+│   │ restore      │   IPC   │  │   Watcher   │    │   Checkpoint   │   │     │
+│   │ diff         │ (Unix   │  │  (FSEvents/ │───►│    Creator     │   │     │
+│   │ publish      │ Socket) │  │   inotify)  │    │                │   │     │
+│   │ push/pull    │         │  └─────────────┘    └───────┬────────┘   │     │
+│   └──────────────┘         │         │                   │            │     │
+│                            │         ▼                   │            │     │
+│                            │  ┌─────────────┐            │            │     │
+│                            │  │  Debouncer  │            │            │     │
+│                            │  │  (300ms)    │            │            │     │
+│                            │  └─────────────┘            │            │     │
+│                            └─────────────────────────────┼────────────┘     │
+│                                                          │                  │
+│   ┌──────────────────────────────────────────────────────┼────────────────┐ │
+│   │                         Storage Layer                │                │ │
+│   ├──────────────────────────────────────────────────────┼────────────────┤ │
+│   │                                                      ▼                │ │
+│   │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐       │ │
+│   │  │     Blobs       │  │     Trees       │  │    Journal      │       │ │
+│   │  │  (SHA-1, zstd)  │  │  (Git format)   │  │   (Sled DB)     │       │ │
+│   │  │                 │  │                 │  │                 │       │ │
+│   │  │ .tl/objects/    │  │ .tl/objects/    │  │ .tl/journal/    │       │ │
+│   │  │    blobs/       │  │    trees/       │  │                 │       │ │
+│   │  └─────────────────┘  └─────────────────┘  └─────────────────┘       │ │
+│   └──────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│   ┌──────────────────────────────────────────────────────────────────────┐ │
+│   │                      JJ Integration Layer                             │ │
+│   ├──────────────────────────────────────────────────────────────────────┤ │
+│   │                                                                       │ │
+│   │  tl publish              tl push/pull                                │ │
+│   │       │                       │                                      │ │
+│   │       ▼                       ▼                                      │ │
+│   │  ┌─────────┐            ┌─────────┐            ┌─────────────┐       │ │
+│   │  │Checkpoint│───────────►│   JJ    │───────────►│  Git Remote │       │ │
+│   │  │  → JJ   │            │ Commits │            │  (GitHub)   │       │ │
+│   │  └─────────┘            └─────────┘            └─────────────┘       │ │
+│   │                                                                       │ │
+│   └──────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Background daemon** watches for file changes (FSEvents/inotify)
-2. **Debouncer** coalesces rapid changes (300ms window)
-3. **Every 5 seconds**, creates a content-addressed checkpoint
-4. **Only changed files** are hashed and stored (O(k) complexity)
-5. **Publish to Git** via Jujutsu integration
+### Data Flow
+
+1. **File Watcher** detects changes (FSEvents on macOS, inotify on Linux)
+2. **Debouncer** coalesces rapid changes (300ms window per file)
+3. **Checkpoint Creator** hashes only changed files (O(k) complexity)
+4. **Storage Layer** deduplicates via content-addressing (SHA-1)
+5. **JJ Integration** publishes checkpoints as Git-compatible commits
 
 ### Storage Model
 
