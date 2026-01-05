@@ -488,6 +488,9 @@ pub fn publish_checkpoint(
 /// Behavior depends on options.compact_range:
 /// - If true: Create single JJ commit from end checkpoint (squash)
 /// - If false: Create one JJ commit per checkpoint (preserve history)
+///
+/// Performance optimization: Uses a single transaction for all checkpoints
+/// to avoid repeated repo loading and transaction overhead.
 pub fn publish_range(
     checkpoints: Vec<Checkpoint>,
     store: &Store,
@@ -495,23 +498,168 @@ pub fn publish_range(
     mapping: &crate::mapping::JjMapping,
     options: &PublishOptions,
 ) -> Result<Vec<String>> {
+    use jj_lib::merged_tree::MergedTree;
+    use jj_lib::repo::Repo;
+
+    if checkpoints.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Compact mode: only publish the last checkpoint
     if options.compact_range {
-        // Compact mode: only publish the last checkpoint
         if let Some(last) = checkpoints.last() {
             let commit_id = publish_checkpoint(last, store, workspace, mapping, options)?;
-            Ok(vec![commit_id])
-        } else {
-            Ok(vec![])
+            return Ok(vec![commit_id]);
         }
-    } else {
-        // Expand mode: publish each checkpoint
-        let mut commit_ids = Vec::new();
-        for checkpoint in checkpoints {
-            let commit_id = publish_checkpoint(&checkpoint, store, workspace, mapping, options)?;
-            commit_ids.push(commit_id);
-        }
-        Ok(commit_ids)
+        return Ok(vec![]);
     }
+
+    // Expand mode: publish all checkpoints in a SINGLE transaction
+    // This avoids repeated repo loading and transaction overhead
+
+    // Load repo ONCE
+    let repo = workspace.repo_loader().load_at_head()
+        .context("Failed to load repo")?;
+
+    // Start transaction ONCE
+    let mut tx = repo.start_transaction();
+
+    let mut commit_ids = Vec::new();
+    let mut last_commit: Option<jj_lib::commit::Commit> = None;
+
+    for checkpoint in &checkpoints {
+        // Get fresh references each iteration to satisfy borrow checker
+        let mut_repo = tx.repo_mut();
+        let jj_store = Repo::store(mut_repo).clone(); // Clone the Arc
+
+        // Load the checkpoint's tree
+        let tree = store.read_tree(checkpoint.root_tree)
+            .context("Failed to read checkpoint tree")?;
+
+        // Determine parent commits and tree for incremental conversion
+        let (parent_ids, parent_jj_tree_id, use_true_parent) = determine_parents(
+            checkpoint,
+            mapping,
+            &jj_store,
+            tx.repo_mut(),
+            workspace,
+            last_commit.as_ref(),
+        )?;
+
+        // Determine effective touched paths
+        let effective_touched_paths: Vec<PathBuf> = if use_true_parent {
+            checkpoint.touched_paths.clone()
+        } else if parent_jj_tree_id.is_some() {
+            let seed_tree = load_seed_tree(store, mapping)?;
+            compute_tree_diff_paths(&seed_tree, &tree)
+        } else {
+            Vec::new()
+        };
+
+        // Convert tree (incremental if possible)
+        let jj_tree_id = convert_tree_to_jj_incremental(
+            &tree,
+            store,
+            &jj_store,
+            &effective_touched_paths,
+            parent_jj_tree_id.as_ref(),
+        )?;
+
+        // Format commit message
+        let commit_message = format_commit_message(checkpoint, &options.message_options);
+
+        // Build commit - get fresh mut_repo reference
+        let mut_repo = tx.repo_mut();
+        let merged_tree = MergedTree::resolved(jj_store.clone(), jj_tree_id);
+        let commit = mut_repo.new_commit(parent_ids, merged_tree)
+            .set_description(commit_message)
+            .write()?;
+
+        let commit_id = commit.id().hex();
+
+        // Update working copy pointer
+        mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), commit.id().clone())?;
+
+        // Store bidirectional mapping (with per-checkpoint flush for crash safety)
+        mapping.set(checkpoint.id, &commit_id)
+            .context("Failed to store checkpoint mapping")?;
+        mapping.set_reverse(&commit_id, checkpoint.id)
+            .context("Failed to store reverse mapping")?;
+
+        last_commit = Some(commit);
+        commit_ids.push(commit_id);
+    }
+
+    // Commit transaction ONCE at the end
+    tx.commit("publish checkpoints")
+        .context("Failed to commit transaction")?;
+
+    Ok(commit_ids)
+}
+
+/// Determine parent commits and tree ID for a checkpoint being published
+///
+/// Returns (parent_commit_ids, parent_tree_id, use_true_parent)
+fn determine_parents(
+    checkpoint: &Checkpoint,
+    mapping: &crate::mapping::JjMapping,
+    jj_store: &std::sync::Arc<jj_lib::store::Store>,
+    mut_repo: &jj_lib::repo::MutableRepo,
+    workspace: &jj_lib::workspace::Workspace,
+    last_commit: Option<&jj_lib::commit::Commit>,
+) -> Result<(Vec<jj_lib::backend::CommitId>, Option<jj_lib::backend::TreeId>, bool)> {
+    use jj_lib::repo::Repo;
+
+    // If we just published a commit in this batch, use it as parent
+    if let Some(prev_commit) = last_commit {
+        let parent_tree_id = prev_commit.tree_ids().as_resolved().cloned();
+        return Ok((vec![prev_commit.id().clone()], parent_tree_id, true));
+    }
+
+    // Check if checkpoint has a parent that's already published
+    if let Some(parent_cp_id) = checkpoint.parent {
+        if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
+            let parent_commit_id = jj_lib::backend::CommitId::new(
+                hex::decode(&jj_commit_id_str).context("Invalid parent commit hex")?
+            );
+
+            let parent_tree_id = match jj_store.get_commit(&parent_commit_id) {
+                Ok(parent_commit) => parent_commit.tree_ids().as_resolved().cloned(),
+                Err(_) => None,
+            };
+
+            return Ok((vec![parent_commit_id], parent_tree_id, true));
+        }
+
+        // Parent not published - use seed tree as fallback
+        let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_name())
+            .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
+
+        let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+            let seed_commit_id = jj_lib::backend::CommitId::new(
+                hex::decode(&seed_commit_id_str).ok()?
+            );
+            match jj_store.get_commit(&seed_commit_id) {
+                Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
+                Err(_) => None,
+            }
+        });
+
+        return Ok((vec![wc_commit_id.clone()], seed_tree_id, false));
+    }
+
+    // Root checkpoint - use seed commit
+    let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+        let seed_commit_id = jj_lib::backend::CommitId::new(
+            hex::decode(&seed_commit_id_str).ok()?
+        );
+        match jj_store.get_commit(&seed_commit_id) {
+            Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
+            Err(_) => None,
+        }
+    });
+
+    Ok((vec![Repo::store(mut_repo).root_commit_id().clone()], seed_tree_id, false))
 }
 
 /// Load the seed commit's tree from TL storage

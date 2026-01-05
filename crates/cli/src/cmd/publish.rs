@@ -196,8 +196,8 @@ async fn parse_checkpoint_range(
 }
 
 /// Maximum gap between checkpoints before falling back to tree-diff
-/// Publishing 10 checkpoints is fast (~100ms), beyond that use tree-diff
-const MAX_CHAIN_GAP: usize = 10;
+/// Publishing 20 checkpoints is fast (~100-200ms), beyond that use tree-diff
+const MAX_CHAIN_GAP: usize = 20;
 
 /// Smart chain publishing: find nearest published ancestor and publish minimal chain
 ///
