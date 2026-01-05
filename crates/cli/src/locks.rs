@@ -141,11 +141,11 @@ fn try_flock_exclusive(file: &File) -> Result<bool> {
 /// Check if process is alive
 #[cfg(target_os = "macos")]
 fn is_process_alive(pid: u32) -> bool {
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
     // Send signal 0 (null signal) - checks existence without killing
-    match kill(Pid::from_raw(pid as i32), Some(Signal::SIGUSR1)) {
+    match kill(Pid::from_raw(pid as i32), None) {
         Ok(_) => true,
         Err(nix::errno::Errno::ESRCH) => false, // No such process
         Err(_) => true,                         // Permission denied or other - assume alive
