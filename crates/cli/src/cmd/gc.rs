@@ -96,7 +96,7 @@ pub async fn run() -> Result<()> {
     if daemon_was_running {
         println!();
         println!("{}", "Restarting daemon...".dimmed());
-        crate::daemon::ensure_daemon_running().await?;
+        crate::daemon::ensure_daemon_running_with_timeout(3).await?;
     }
 
     Ok(())

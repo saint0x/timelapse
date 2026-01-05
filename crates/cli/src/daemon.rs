@@ -582,8 +582,13 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ensure daemon is running, auto-start if needed
+/// Ensure daemon is running, auto-start if needed (default 1s timeout)
 pub async fn ensure_daemon_running() -> Result<()> {
+    ensure_daemon_running_with_timeout(1).await
+}
+
+/// Ensure daemon is running with configurable timeout
+pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()> {
     // Check if daemon is already running
     if is_running().await {
         return Ok(());
@@ -596,7 +601,7 @@ pub async fn ensure_daemon_running() -> Result<()> {
     start_background_internal(&repo_root).await?;
 
     // Wait with timeout for startup confirmation
-    let timeout = Duration::from_secs(1);
+    let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();
 
     while start.elapsed() < timeout {
@@ -610,7 +615,7 @@ pub async fn ensure_daemon_running() -> Result<()> {
     let log_file = repo_root.join(".tl/logs/daemon.log");
     anyhow::bail!(
         "Daemon failed to start within {}s (check logs at {})",
-        timeout.as_secs(),
+        timeout_secs,
         log_file.display()
     )
 }

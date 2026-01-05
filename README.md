@@ -2,7 +2,7 @@
 
 **Automatic checkpoint streams for agent-native development workflows. Built on Jujutsu (JJ) for Git compatibility.**
 
-Timelapse provides lossless, sub-10ms checkpoint capture for autonomous agents and AI-assisted coding tools. Every file save creates a content-addressed snapshot with instant restoration to any previous state. Powered by [Jujutsu](https://github.com/martinvonz/jj) for production-grade Git interoperability.
+Timelapse provides lossless, sub-10ms checkpoint capture for autonomous agents and AI-assisted coding tools. Every file save creates a content-addressed snapshot with instant restoration to any previous state.
 
 ## Technical Overview
 
@@ -25,8 +25,6 @@ Timelapse leverages [Jujutsu](https://github.com/martinvonz/jj) as the bridge to
 - Atomic operations and conflict-free merging inherited from JJ
 - Bidirectional checkpoint ↔ commit materialization
 - Standard `git push/pull` workflows via `jj git` commands
-
-**Why JJ?** Mature, well-tested foundation for programmatic version control with superior semantics for autonomous agents.
 
 ---
 

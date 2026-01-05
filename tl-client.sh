@@ -1,500 +1,269 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Timelapse Client Wrapper
+# Timelapse Client Wrapper - Full Featured
 # ==============================================================================
 #
-# Drop this script into any repository to enable instant checkpoint management.
-# This wrapper provides a simplified interface to the TL (Timelapse) binary
-# with built-in guidance for AI agents and developers.
+# TL replaces Git for version control. Automatic checkpoints + JJ integration.
 #
-# PURPOSE:
-#   Timelapse captures automatic checkpoints of your working directory every
-#   time files change. Think of it as "git commit" that happens automatically
-#   in the background, letting you restore to any previous state instantly.
+# QUICK START:
+#   ./tl-client.sh setup     # Initialize
+#   ./tl-client.sh save      # Checkpoint
+#   ./tl-client.sh push      # Push to remote
+#   ./tl-client.sh pull      # Pull from remote
 #
-# QUICK START FOR AGENTS:
-#   1. Run: ./tl-client.sh setup      # Initialize timelapse in this repo
-#   2. Modify files as needed
-#   3. Run: ./tl-client.sh save       # Force checkpoint creation
-#   4. Run: ./tl-client.sh log        # See checkpoint history
-#   5. Run: ./tl-client.sh restore    # Restore to previous checkpoint
+# CHECKPOINT COMMANDS:
+#   setup, save, log, status, restore, diff, info, pin, unpin, gc
+#
+# REMOTE COMMANDS (via JJ):
+#   push, pull, publish
+#
+# WORKSPACE COMMANDS:
+#   worktree list|add|remove|switch
 #
 # ==============================================================================
 
-set -e  # Exit on error
+set -e
 
-# Configuration
-TL_BINARY="${TL_BINARY:-tl}"  # Override with environment variable if needed
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TL_BINARY="${TL_BINARY:-tl}"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ==============================================================================
-# Helper Functions
-# ==============================================================================
+print_header() { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
+print_success() { echo -e "${GREEN}✓${NC} $1"; }
+print_error() { echo -e "${RED}✗${NC} $1" >&2; }
+print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
 
-print_header() {
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}$1${NC}"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+check_tl() {
+    command -v "$TL_BINARY" &>/dev/null || { print_error "TL binary not found. Set TL_BINARY env var."; exit 1; }
 }
 
-print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+check_init() {
+    [ -d ".tl" ] || { print_error "Not initialized. Run: $0 setup"; exit 1; }
 }
 
-print_error() {
-    echo -e "${RED}✗${NC} $1" >&2
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
-
-print_info() {
-    echo -e "${BLUE}ℹ${NC} $1"
-}
-
-check_tl_binary() {
-    if ! command -v "$TL_BINARY" &> /dev/null; then
-        print_error "TL binary not found at: $TL_BINARY"
-        echo ""
-        echo "Please install timelapse or set TL_BINARY environment variable:"
-        echo "  export TL_BINARY=/path/to/tl"
-        echo ""
-        echo "To build from source:"
-        echo "  cd /path/to/timelapse"
-        echo "  cargo build --release"
-        echo "  export TL_BINARY=\$PWD/target/release/tl"
-        exit 1
-    fi
-}
-
-is_initialized() {
-    [ -d ".tl" ]
-}
-
-is_daemon_running() {
-    # Check if daemon socket exists
-    [ -S ".tl/state/daemon.sock" ] && return 0 || return 1
+check_daemon() {
+    [ -S ".tl/state/daemon.sock" ] || { print_error "Daemon not running. Run: $0 setup"; exit 1; }
 }
 
 # ==============================================================================
-# Command Functions
+# CHECKPOINT COMMANDS
 # ==============================================================================
 
 cmd_setup() {
-    # WHEN TO USE: First time setting up timelapse in a repository
-    # WHAT IT DOES: Initializes .tl directory and starts the daemon
-    # AGENT GUIDANCE: Run this once per repository before any other commands
-
-    print_header "Setting up Timelapse"
-
-    if is_initialized; then
-        print_warning "Timelapse already initialized in this repository"
-        if ! is_daemon_running; then
-            print_info "Starting daemon..."
-            "$TL_BINARY" start
-            print_success "Daemon started"
-        else
-            print_success "Daemon already running"
-        fi
+    # Initialize TL and start daemon. Run once per repo.
+    print_header "Setup"
+    if [ -d ".tl" ]; then
+        print_warning "Already initialized"
+        [ -S ".tl/state/daemon.sock" ] || { "$TL_BINARY" start; print_success "Daemon started"; }
     else
-        print_info "Initializing timelapse..."
-        "$TL_BINARY" init
-        print_success "Timelapse initialized"
-
-        print_info "Starting daemon..."
-        "$TL_BINARY" start
-        print_success "Daemon started"
+        "$TL_BINARY" init && "$TL_BINARY" start
+        print_success "Initialized and daemon started"
     fi
-
-    echo ""
-    print_info "Timelapse is now tracking changes automatically"
-    print_info "Checkpoints are created every 5 seconds when files change"
 }
 
 cmd_save() {
-    # WHEN TO USE: After making significant changes you want to checkpoint immediately
-    # WHAT IT DOES: Forces immediate checkpoint creation (doesn't wait for 5s interval)
-    # AGENT GUIDANCE: Use after completing a logical unit of work
-
-    print_header "Creating Checkpoint"
-
-    if ! is_daemon_running; then
-        print_error "Daemon is not running. Start it with: $0 setup"
-        exit 1
-    fi
-
-    print_info "Flushing changes to create checkpoint..."
+    # Force immediate checkpoint. Use after completing work.
+    check_daemon
+    print_info "Creating checkpoint..."
     "$TL_BINARY" flush
     print_success "Checkpoint created"
 }
 
 cmd_log() {
-    # WHEN TO USE: To see history of checkpoints and find one to restore
-    # WHAT IT DOES: Shows checkpoint timeline with timestamps and changes
-    # AGENT GUIDANCE: Use before restore to see available checkpoints
-
-    print_header "Checkpoint History"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
-    local limit="${1:-20}"
-    "$TL_BINARY" log --limit "$limit"
+    # Show checkpoint history. Usage: log [limit]
+    check_init
+    "$TL_BINARY" log --limit "${1:-20}"
 }
 
 cmd_status() {
-    # WHEN TO USE: To check if daemon is running and see repository state
-    # WHAT IT DOES: Shows daemon status, checkpoint count, and repository info
-    # AGENT GUIDANCE: Use for debugging or checking system health
-
-    print_header "Timelapse Status"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
+    # Show daemon and checkpoint status
+    check_init
     "$TL_BINARY" status
 }
 
 cmd_restore() {
-    # WHEN TO USE: To undo changes and go back to a previous checkpoint
-    # WHAT IT DOES: Restores working directory to exact state at checkpoint
-    # AGENT GUIDANCE: Use when you want to undo recent changes
-    # WARNING: This will overwrite current working directory!
-
-    print_header "Restore from Checkpoint"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
-    if [ -z "$1" ]; then
-        print_error "Checkpoint ID required"
-        echo ""
-        echo "Usage: $0 restore <checkpoint-id>"
-        echo ""
-        print_info "Run '$0 log' to see available checkpoints"
-        exit 1
-    fi
-
-    local checkpoint_id="$1"
-
-    print_warning "This will restore your working directory to checkpoint: $checkpoint_id"
-    print_warning "Current changes will be overwritten!"
-    echo ""
-
-    "$TL_BINARY" restore "$checkpoint_id"
+    # Restore to checkpoint. Usage: restore <id>
+    # WARNING: Overwrites working directory!
+    check_init
+    [ -z "$1" ] && { print_error "Usage: $0 restore <checkpoint-id>"; exit 1; }
+    print_warning "Restoring to: $1 (current changes will be lost)"
+    "$TL_BINARY" restore "$1"
 }
 
 cmd_diff() {
-    # WHEN TO USE: To see what changed between two checkpoints
-    # WHAT IT DOES: Shows file differences between checkpoints
-    # AGENT GUIDANCE: Use to understand what changed before restoring
-
-    print_header "Diff Between Checkpoints"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
-    if [ -z "$1" ] || [ -z "$2" ]; then
-        print_error "Two checkpoint IDs required"
-        echo ""
-        echo "Usage: $0 diff <checkpoint-a> <checkpoint-b>"
-        exit 1
-    fi
-
+    # Show diff between checkpoints. Usage: diff <id-a> <id-b>
+    check_init
+    [ -z "$1" ] || [ -z "$2" ] && { print_error "Usage: $0 diff <id-a> <id-b>"; exit 1; }
     "$TL_BINARY" diff "$1" "$2"
 }
 
+cmd_info() {
+    # Show detailed repo info (storage stats, checkpoint count)
+    check_init
+    "$TL_BINARY" info
+}
+
+cmd_pin() {
+    # Name a checkpoint. Usage: pin <id> <name>
+    [ -z "$1" ] || [ -z "$2" ] && { print_error "Usage: $0 pin <id> <name>"; exit 1; }
+    "$TL_BINARY" pin "$1" "$2"
+    print_success "Pinned as: $2"
+}
+
+cmd_unpin() {
+    # Remove a pin. Usage: unpin <name>
+    [ -z "$1" ] && { print_error "Usage: $0 unpin <name>"; exit 1; }
+    "$TL_BINARY" unpin "$1"
+    print_success "Unpinned: $1"
+}
+
+cmd_gc() {
+    # Run garbage collection to reclaim space
+    check_init
+    print_info "Running garbage collection..."
+    "$TL_BINARY" gc
+    print_success "GC complete"
+}
+
 cmd_start() {
-    # WHEN TO USE: To start the daemon if it's not running
-    # WHAT IT DOES: Starts background daemon that creates automatic checkpoints
-    # AGENT GUIDANCE: Usually called automatically by 'setup'
-
-    print_header "Starting Daemon"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
-    if is_daemon_running; then
-        print_warning "Daemon is already running"
-        exit 0
-    fi
-
+    # Start the daemon
+    check_init
+    [ -S ".tl/state/daemon.sock" ] && { print_warning "Daemon already running"; exit 0; }
     "$TL_BINARY" start
     print_success "Daemon started"
 }
 
 cmd_stop() {
-    # WHEN TO USE: To stop the daemon (e.g., before shutting down)
-    # WHAT IT DOES: Gracefully stops the daemon after flushing pending changes
-    # AGENT GUIDANCE: Usually not needed; daemon stops automatically on exit
-
-    print_header "Stopping Daemon"
-
-    if ! is_daemon_running; then
-        print_warning "Daemon is not running"
-        exit 0
-    fi
-
+    # Stop the daemon
+    [ -S ".tl/state/daemon.sock" ] || { print_warning "Daemon not running"; exit 0; }
     "$TL_BINARY" stop
     print_success "Daemon stopped"
 }
 
-cmd_info() {
-    # WHEN TO USE: To see detailed repository information
-    # WHAT IT DOES: Shows storage stats, checkpoint count, etc.
-    # AGENT GUIDANCE: Use for debugging or monitoring
+# ==============================================================================
+# REMOTE COMMANDS (via JJ integration)
+# ==============================================================================
 
-    print_header "Repository Information"
-
-    if ! is_initialized; then
-        print_error "Not initialized. Run: $0 setup"
-        exit 1
-    fi
-
-    "$TL_BINARY" info
+cmd_push() {
+    # Push to Git remote via JJ
+    # Usage: push [-b bookmark] [--all] [--force]
+    check_init
+    print_info "Pushing to remote..."
+    "$TL_BINARY" push "$@"
+    print_success "Pushed"
 }
 
-cmd_pin() {
-    # WHEN TO USE: To mark important checkpoints with a memorable name
-    # WHAT IT DOES: Assigns a name to a checkpoint for easy reference
-    # AGENT GUIDANCE: Use to mark milestones (e.g., "working-auth", "before-refactor")
-
-    if [ -z "$1" ] || [ -z "$2" ]; then
-        print_error "Checkpoint ID and name required"
-        echo ""
-        echo "Usage: $0 pin <checkpoint-id> <name>"
-        echo "Example: $0 pin 01HXKJ7NVQ working-version"
-        exit 1
-    fi
-
-    "$TL_BINARY" pin "$1" "$2"
-    print_success "Checkpoint pinned as: $2"
+cmd_pull() {
+    # Pull from Git remote via JJ
+    # Usage: pull [--fetch-only] [--no-pin]
+    check_init
+    print_info "Pulling from remote..."
+    "$TL_BINARY" pull "$@"
+    print_success "Pulled"
 }
+
+cmd_publish() {
+    # Publish checkpoint(s) to JJ for pushing
+    # Usage: publish <checkpoint> [-b bookmark] [--compact] [--no-pin]
+    # Example: publish HEAD or publish HEAD~10..HEAD
+    check_init
+    [ -z "$1" ] && { print_error "Usage: $0 publish <checkpoint> [-b bookmark]"; exit 1; }
+    "$TL_BINARY" publish "$@"
+    print_success "Published"
+}
+
+# ==============================================================================
+# WORKSPACE COMMANDS
+# ==============================================================================
+
+cmd_worktree() {
+    # Manage JJ workspaces
+    # Usage: worktree list|add|remove|switch [args]
+    check_init
+    [ -z "$1" ] && { print_error "Usage: $0 worktree list|add|remove|switch"; exit 1; }
+    "$TL_BINARY" worktree "$@"
+}
+
+# ==============================================================================
+# HELP
+# ==============================================================================
 
 cmd_help() {
     cat << 'EOF'
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                         Timelapse Client Wrapper                              ║
-║                    Automatic Checkpoint Management for Git                    ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+TL Client - Timelapse Version Control (replaces Git)
 
-QUICK START (for AI Agents):
-  1. ./tl-client.sh setup          # Initialize and start tracking
-  2. <make changes to files>
-  3. ./tl-client.sh save           # Create checkpoint
-  4. ./tl-client.sh log            # View history
-  5. ./tl-client.sh restore <id>   # Undo changes
+CHECKPOINT COMMANDS:
+  setup              Initialize TL in repo, start daemon
+  save               Create checkpoint immediately
+  log [n]            Show last n checkpoints (default: 20)
+  status             Show daemon/checkpoint status
+  restore <id>       Restore to checkpoint (overwrites working dir!)
+  diff <a> <b>       Show diff between two checkpoints
+  info               Show repo stats
+  pin <id> <name>    Name a checkpoint
+  unpin <name>       Remove a pin
+  gc                 Garbage collection
+  start/stop         Control daemon
 
-COMMON WORKFLOW:
-  • After making changes: ./tl-client.sh save
-  • Before risky changes: ./tl-client.sh save (to create restore point)
-  • To undo last changes: ./tl-client.sh log, then ./tl-client.sh restore <id>
-  • To see what changed: ./tl-client.sh diff <id-a> <id-b>
+REMOTE COMMANDS (via JJ):
+  push               Push to Git remote
+                     Options: -b <bookmark>, --all, --force
+  pull               Pull from Git remote
+                     Options: --fetch-only, --no-pin
+  publish <id>       Publish checkpoint to JJ for pushing
+                     Options: -b <bookmark>, --compact
 
-AVAILABLE COMMANDS:
+WORKSPACE COMMANDS:
+  worktree list      List workspaces
+  worktree add       Add workspace
+  worktree remove    Remove workspace
+  worktree switch    Switch workspace
 
-  setup                 Initialize timelapse and start daemon
-                        WHEN: First time in a new repository
-                        DOES: Creates .tl directory, starts background tracking
+WORKFLOW:
+  1. ./tl-client.sh setup           # Once per repo
+  2. <make changes>
+  3. ./tl-client.sh save            # Checkpoint
+  4. ./tl-client.sh publish HEAD    # Prepare for push
+  5. ./tl-client.sh push            # Push to remote
 
-  save                  Create checkpoint immediately
-                        WHEN: After completing a logical unit of work
-                        DOES: Forces checkpoint creation (doesn't wait for auto)
+RESTORE WORKFLOW:
+  ./tl-client.sh log                # Find checkpoint
+  ./tl-client.sh restore <id>       # Restore
 
-  log [limit]           Show checkpoint history (default: 20)
-                        WHEN: To see available checkpoints before restoring
-                        DOES: Lists checkpoints with timestamps and changes
-
-  status                Show daemon status and repository info
-                        WHEN: To check if daemon is running
-                        DOES: Displays system health and checkpoint count
-
-  restore <id>          Restore working directory to checkpoint
-                        WHEN: To undo changes or go back in time
-                        DOES: Overwrites current files with checkpoint state
-                        WARNING: Current changes will be lost!
-
-  diff <id-a> <id-b>    Show changes between checkpoints
-                        WHEN: To understand what changed
-                        DOES: Displays file differences
-
-  start                 Start the daemon
-                        WHEN: If daemon stopped
-                        DOES: Starts background checkpoint tracking
-
-  stop                  Stop the daemon
-                        WHEN: Before shutting down (optional)
-                        DOES: Gracefully stops daemon
-
-  info                  Show detailed repository information
-                        WHEN: For debugging or monitoring
-                        DOES: Shows storage stats, checkpoint count
-
-  pin <id> <name>       Name a checkpoint for easy reference
-                        WHEN: To mark important milestones
-                        DOES: Assigns memorable name to checkpoint
-
-  help                  Show this help message
-
-CONCEPTS FOR AI AGENTS:
-
-  Checkpoints:
-    • Automatic snapshots of your entire working directory
-    • Created every 5 seconds when files change
-    • Stored efficiently using content-addressed storage
-    • Can restore to any checkpoint instantly
-
-  Daemon:
-    • Background process that watches files
-    • Creates checkpoints automatically
-    • Must be running for automatic checkpoints
-    • Stops gracefully when you exit
-
-  When to Create Manual Checkpoints:
-    ✓ Before starting risky refactoring
-    ✓ After implementing a working feature
-    ✓ Before experimenting with alternative approaches
-    ✓ When you want guaranteed restore point
-
-  When to Restore:
-    ✓ Code broke and you want to go back
-    ✓ Exploring alternative implementation
-    ✓ Reverting accidental changes
-    ✓ Testing different approaches
-
-PERFORMANCE:
-  • Checkpoint creation: < 1 second
-  • Restore operation: < 100ms for most projects
-  • Storage: ~1.2x Git size (deduplication + compression)
-  • No impact on normal development workflow
-
-EXAMPLES:
-
-  # Initialize in new project
-  $ ./tl-client.sh setup
-
-  # Work on feature
-  $ <edit files>
-  $ ./tl-client.sh save
-
-  # Check history
-  $ ./tl-client.sh log
-
-  # Restore to previous checkpoint
-  $ ./tl-client.sh restore 01HXKJ7NVQW3Y2YMZK5VFZX3G8
-
-  # See what changed
-  $ ./tl-client.sh diff 01HXKJ7NVQ 01HXKJ8NVQ
-
-  # Mark important checkpoint
-  $ ./tl-client.sh pin 01HXKJ7NVQ working-auth-implementation
-
-INTEGRATION WITH WORKFLOW:
-
-  For AI Agents:
-    1. ALWAYS run 'setup' when working in a new repository
-    2. Run 'save' after each successful code generation
-    3. Run 'save' before attempting risky changes
-    4. Use 'log' + 'restore' if generated code breaks things
-    5. Use 'diff' to understand what you changed
-
-  Best Practices:
-    • Create checkpoints at logical boundaries
-    • Use descriptive pin names for important milestones
-    • Check 'log' before 'restore' to pick the right checkpoint
-    • 'save' is cheap - use it liberally!
-
-TROUBLESHOOTING:
-
-  Daemon not running:
-    $ ./tl-client.sh start
-
-  Daemon stuck:
-    $ ./tl-client.sh stop
-    $ ./tl-client.sh start
-
-  Check system health:
-    $ ./tl-client.sh status
-    $ ./tl-client.sh info
-
-  Binary not found:
-    $ export TL_BINARY=/path/to/tl
-    $ ./tl-client.sh setup
-
-For more information: https://github.com/anthropics/timelapse
+Checkpoints auto-created every 5 seconds. Manual 'save' for immediate checkpoint.
 EOF
 }
 
 # ==============================================================================
-# Main Command Router
+# MAIN
 # ==============================================================================
 
 main() {
-    check_tl_binary
+    check_tl
+    local cmd="${1:-help}"; shift 2>/dev/null || true
 
-    local command="${1:-help}"
-    shift || true
-
-    case "$command" in
-        setup)
-            cmd_setup "$@"
-            ;;
-        save|flush|checkpoint)
-            cmd_save "$@"
-            ;;
-        log|history)
-            cmd_log "$@"
-            ;;
-        status)
-            cmd_status "$@"
-            ;;
-        restore|revert)
-            cmd_restore "$@"
-            ;;
-        diff)
-            cmd_diff "$@"
-            ;;
-        start)
-            cmd_start "$@"
-            ;;
-        stop)
-            cmd_stop "$@"
-            ;;
-        info)
-            cmd_info "$@"
-            ;;
-        pin)
-            cmd_pin "$@"
-            ;;
-        help|--help|-h)
-            cmd_help
-            ;;
-        *)
-            print_error "Unknown command: $command"
-            echo ""
-            echo "Run '$0 help' for usage information"
-            exit 1
-            ;;
+    case "$cmd" in
+        setup)                      cmd_setup "$@" ;;
+        save|flush|checkpoint)      cmd_save "$@" ;;
+        log|history)                cmd_log "$@" ;;
+        status)                     cmd_status "$@" ;;
+        restore|revert)             cmd_restore "$@" ;;
+        diff)                       cmd_diff "$@" ;;
+        info)                       cmd_info "$@" ;;
+        pin)                        cmd_pin "$@" ;;
+        unpin)                      cmd_unpin "$@" ;;
+        gc)                         cmd_gc "$@" ;;
+        start)                      cmd_start "$@" ;;
+        stop)                       cmd_stop "$@" ;;
+        push)                       cmd_push "$@" ;;
+        pull)                       cmd_pull "$@" ;;
+        publish)                    cmd_publish "$@" ;;
+        worktree|wt)                cmd_worktree "$@" ;;
+        help|--help|-h)             cmd_help ;;
+        *)                          print_error "Unknown: $cmd. Run '$0 help'"; exit 1 ;;
     esac
 }
 
-# Run main function with all arguments
 main "$@"

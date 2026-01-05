@@ -67,12 +67,12 @@ pub async fn run(
             current_checkpoint: Some(checkpoint_id),
             last_switched_ms: current_timestamp_ms(),
             created_ms: current_timestamp_ms(),
-            auto_pin: Some(format!("ws:{}", current_name)),
+            auto_pin: Some(format!("ws-{}", current_name)),
         };
         ws_manager.set_state(&current_state)?;
 
         // Auto-pin
-        pin_manager.pin(&format!("ws:{}", current_name), checkpoint_id)?;
+        pin_manager.pin(&format!("ws-{}", current_name), checkpoint_id)?;
 
         let short_id = &checkpoint_id.to_string()[..8];
         println!("  {} Checkpoint: {}", "✓".green(), short_id.yellow());
@@ -111,7 +111,7 @@ pub async fn run(
         current_checkpoint: checkpoint_id,
         last_switched_ms: current_timestamp_ms(),
         created_ms: current_timestamp_ms(),
-        auto_pin: Some(format!("ws:{}", name)),
+        auto_pin: Some(format!("ws-{}", name)),
     };
     ws_manager.set_state(&state)?;
 
