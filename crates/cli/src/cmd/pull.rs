@@ -275,6 +275,9 @@ fn check_working_dir_changes(
 }
 
 /// Create a checkpoint of current working directory state (for stash)
+///
+/// CRITICAL: This now validates stash completeness by tracking walk errors.
+/// If any files fail to be captured, the stash is considered incomplete.
 fn create_stash_checkpoint(
     repo_root: &Path,
     store: &Store,
@@ -284,6 +287,7 @@ fn create_stash_checkpoint(
 
     let mut tree = Tree::new();
     let mut files_changed = 0u32;
+    let mut walk_errors = Vec::new();
 
     // Walk working directory
     for entry in walkdir::WalkDir::new(repo_root)
@@ -295,7 +299,11 @@ fn create_stash_checkpoint(
     {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                // Track walk errors instead of silently skipping
+                walk_errors.push(format!("Walk error: {}", e));
+                continue;
+            }
         };
 
         if !entry.file_type().is_file() {
@@ -308,25 +316,55 @@ fn create_stash_checkpoint(
             Err(_) => continue,
         };
 
-        // Hash and store blob
-        let blob_hash = tl_core::hash::hash_file(path)?;
+        // Hash and store blob - track errors
+        let blob_hash = match tl_core::hash::hash_file(path) {
+            Ok(h) => h,
+            Err(e) => {
+                walk_errors.push(format!("Hash error {}: {}", path.display(), e));
+                continue;
+            }
+        };
 
         if !store.blob_store().has_blob(blob_hash) {
-            let content = std::fs::read(path)?;
-            store.blob_store().write_blob(blob_hash, &content)?;
+            let content = match std::fs::read(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    walk_errors.push(format!("Read error {}: {}", path.display(), e));
+                    continue;
+                }
+            };
+            if let Err(e) = store.blob_store().write_blob(blob_hash, &content) {
+                walk_errors.push(format!("Write blob error {}: {}", path.display(), e));
+                continue;
+            }
         }
 
         // Get file mode
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::MetadataExt;
-            entry.metadata()?.mode()
+            match entry.metadata() {
+                Ok(m) => m.mode(),
+                Err(e) => {
+                    walk_errors.push(format!("Metadata error {}: {}", path.display(), e));
+                    continue;
+                }
+            }
         };
         #[cfg(not(unix))]
         let mode = 0o644;
 
         tree.insert(rel_path, Entry::file(mode, blob_hash));
         files_changed += 1;
+    }
+
+    // CRITICAL: Fail if stash is incomplete
+    if !walk_errors.is_empty() {
+        anyhow::bail!(
+            "Stash incomplete - {} file(s) could not be captured:\n  {}",
+            walk_errors.len(),
+            walk_errors.iter().take(5).cloned().collect::<Vec<_>>().join("\n  ")
+        );
     }
 
     // Store tree

@@ -111,10 +111,13 @@ impl Daemon {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
 
-        // Debouncing state
-        let mut pending_paths: HashSet<Arc<Path>> = HashSet::new();
+        // Debouncing state - load any pending paths from previous crash
+        let tl_dir = self.store.tl_dir().to_path_buf();
+        let mut pending_paths: HashSet<Arc<Path>> = load_pending_paths(&tl_dir);
         let mut last_checkpoint = Instant::now();
         let checkpoint_interval = Duration::from_secs(5); // Create checkpoint every 5s
+        let mut last_pending_save = Instant::now();
+        let pending_save_interval = Duration::from_secs(2); // Save pending paths every 2s
 
         loop {
             tokio::select! {
@@ -127,6 +130,14 @@ impl Daemon {
 
                         // Update status
                         self.status.write().await.watcher_paths = pending_paths.len();
+
+                        // Periodically save pending paths for crash recovery
+                        if last_pending_save.elapsed() >= pending_save_interval && !pending_paths.is_empty() {
+                            if let Err(e) = save_pending_paths(&tl_dir, &pending_paths) {
+                                tracing::warn!("Failed to save pending paths: {}", e);
+                            }
+                            last_pending_save = Instant::now();
+                        }
                     }
                 }
 
@@ -152,9 +163,14 @@ impl Daemon {
 
                             pending_paths.clear();
                             last_checkpoint = Instant::now();
+
+                            // Clear saved pending paths after successful checkpoint
+                            clear_pending_paths(&tl_dir);
                         }
                         Err(e) => {
                             tracing::error!("Checkpoint creation failed: {}", e);
+                            // Save pending paths in case of crash during error recovery
+                            let _ = save_pending_paths(&tl_dir, &pending_paths);
                         }
                     }
                 }
@@ -183,10 +199,15 @@ impl Daemon {
                                 pending_paths.clear();
                                 last_checkpoint = Instant::now();
 
+                                // Clear saved pending paths after successful checkpoint
+                                clear_pending_paths(&tl_dir);
+
                                 Ok(Some(checkpoint_id.to_string()))
                             }
                             Err(e) => {
                                 tracing::error!("Flush checkpoint failed: {}", e);
+                                // Save pending paths in case of crash
+                                let _ = save_pending_paths(&tl_dir, &pending_paths);
                                 Err(e)
                             }
                         }
@@ -899,4 +920,81 @@ fn current_timestamp_ms() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("System time before UNIX epoch")
         .as_millis() as u64
+}
+
+// =============================================================================
+// Pending Paths Persistence (Fix 11)
+// =============================================================================
+
+/// Path to pending paths file
+fn pending_paths_file(tl_dir: &Path) -> PathBuf {
+    tl_dir.join("state/pending_paths.json")
+}
+
+/// Save pending paths to disk for crash recovery
+///
+/// CRITICAL: This ensures that if the daemon crashes during checkpoint creation,
+/// the pending paths are not lost and can be recovered on restart.
+fn save_pending_paths(tl_dir: &Path, paths: &HashSet<Arc<Path>>) -> Result<()> {
+    let file_path = pending_paths_file(tl_dir);
+
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Convert to Vec<String> for JSON serialization
+    let paths_vec: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    let json = serde_json::to_string(&paths_vec)?;
+    std::fs::write(&file_path, json)?;
+
+    tracing::debug!("Saved {} pending paths to disk", paths.len());
+    Ok(())
+}
+
+/// Load pending paths from disk (for crash recovery)
+fn load_pending_paths(tl_dir: &Path) -> HashSet<Arc<Path>> {
+    let file_path = pending_paths_file(tl_dir);
+
+    if !file_path.exists() {
+        return HashSet::new();
+    }
+
+    match std::fs::read_to_string(&file_path) {
+        Ok(json) => {
+            match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(paths_vec) => {
+                    let paths: HashSet<Arc<Path>> = paths_vec
+                        .into_iter()
+                        .map(|s| Arc::from(PathBuf::from(s).as_path()))
+                        .collect();
+
+                    if !paths.is_empty() {
+                        tracing::info!("Recovered {} pending paths from previous crash", paths.len());
+                    }
+                    paths
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse pending paths: {}", e);
+                    HashSet::new()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read pending paths file: {}", e);
+            HashSet::new()
+        }
+    }
+}
+
+/// Clear pending paths file after successful checkpoint
+fn clear_pending_paths(tl_dir: &Path) {
+    let file_path = pending_paths_file(tl_dir);
+    if file_path.exists() {
+        let _ = std::fs::remove_file(&file_path);
+    }
 }
