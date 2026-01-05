@@ -36,6 +36,154 @@ pub struct PinManager {
     pins_dir: PathBuf,
 }
 
+/// Stash entry metadata
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StashEntry {
+    /// Checkpoint ID of the stashed state
+    pub checkpoint_id: Ulid,
+    /// Timestamp when stash was created
+    pub created_at_ms: u64,
+    /// Optional message describing the stash
+    pub message: Option<String>,
+    /// Checkpoint ID that was HEAD when stash was created (for restore)
+    pub base_checkpoint_id: Option<Ulid>,
+}
+
+/// Stash manager for temporary working directory saves
+///
+/// Similar pattern to PinManager but stores richer metadata.
+/// Used by auto-stash in pull and manual `tl stash` command.
+pub struct StashManager {
+    stash_dir: PathBuf,
+}
+
+impl StashManager {
+    /// Create a new StashManager
+    pub fn new(tl_dir: &Path) -> Self {
+        Self {
+            stash_dir: tl_dir.join("state/stash"),
+        }
+    }
+
+    /// Push a new stash entry
+    ///
+    /// Returns the stash index (0 = most recent)
+    pub fn push(&self, entry: StashEntry) -> Result<usize> {
+        fs::create_dir_all(&self.stash_dir)?;
+
+        // Get next index
+        let existing = self.list()?;
+        let index = existing.len();
+
+        // Write stash file as JSON
+        let stash_path = self.stash_dir.join(format!("stash-{}", index));
+        let json = serde_json::to_string_pretty(&entry)?;
+
+        let mut file = fs::File::create(&stash_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+
+        Ok(index)
+    }
+
+    /// Pop the most recent stash (removes and returns it)
+    pub fn pop(&self) -> Result<Option<StashEntry>> {
+        let stashes = self.list()?;
+        if stashes.is_empty() {
+            return Ok(None);
+        }
+
+        // Get most recent (highest index)
+        let (index, entry) = stashes.into_iter().last().unwrap();
+
+        // Remove the file
+        let stash_path = self.stash_dir.join(format!("stash-{}", index));
+        if stash_path.exists() {
+            fs::remove_file(&stash_path)?;
+        }
+
+        Ok(Some(entry))
+    }
+
+    /// Get stash by index without removing
+    pub fn get(&self, index: usize) -> Result<Option<StashEntry>> {
+        let stash_path = self.stash_dir.join(format!("stash-{}", index));
+
+        if !stash_path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(&stash_path)?;
+        let entry: StashEntry = serde_json::from_str(&contents)?;
+        Ok(Some(entry))
+    }
+
+    /// List all stashes (index, entry) sorted by index
+    pub fn list(&self) -> Result<Vec<(usize, StashEntry)>> {
+        if !self.stash_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut stashes = Vec::new();
+
+        for dir_entry in fs::read_dir(&self.stash_dir)? {
+            let dir_entry = dir_entry?;
+            let path = dir_entry.path();
+
+            if path.is_file() {
+                let filename = dir_entry.file_name().to_string_lossy().to_string();
+                if let Some(index_str) = filename.strip_prefix("stash-") {
+                    if let Ok(index) = index_str.parse::<usize>() {
+                        let contents = fs::read_to_string(&path)?;
+                        if let Ok(entry) = serde_json::from_str::<StashEntry>(&contents) {
+                            stashes.push((index, entry));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by index
+        stashes.sort_by_key(|(idx, _)| *idx);
+        Ok(stashes)
+    }
+
+    /// Drop a stash by index
+    pub fn drop(&self, index: usize) -> Result<bool> {
+        let stash_path = self.stash_dir.join(format!("stash-{}", index));
+
+        if stash_path.exists() {
+            fs::remove_file(&stash_path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Clear all stashes
+    pub fn clear(&self) -> Result<usize> {
+        let stashes = self.list()?;
+        let count = stashes.len();
+
+        for (index, _) in stashes {
+            self.drop(index)?;
+        }
+
+        Ok(count)
+    }
+
+    /// Check if there are any stashes
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.list()?.is_empty())
+    }
+
+    /// Get the most recent stash without removing
+    pub fn peek(&self) -> Result<Option<StashEntry>> {
+        let stashes = self.list()?;
+        Ok(stashes.into_iter().last().map(|(_, entry)| entry))
+    }
+}
+
 impl PinManager {
     /// Create a new PinManager
     pub fn new(tl_dir: &Path) -> Self {

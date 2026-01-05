@@ -3,9 +3,10 @@
 use crate::util;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub async fn run() -> Result<()> {
+pub async fn run(show_remote: bool) -> Result<()> {
     // 1. Find repository root
     let repo_root = util::find_repo_root()
         .context("Failed to find repository")?;
@@ -87,5 +88,136 @@ pub async fn run() -> Result<()> {
     println!("  Total size:  {}", util::format_size(total_size));
     println!();
 
+    // Remote status (if requested)
+    if show_remote {
+        print_remote_status(&repo_root)?;
+    }
+
     Ok(())
+}
+
+/// Get the git remote URL for "origin"
+fn get_git_remote_url(repo_root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
+        }
+    }
+    None
+}
+
+/// Print remote branch status
+fn print_remote_status(repo_root: &Path) -> Result<()> {
+    // Check if JJ workspace exists
+    if jj::detect_jj_workspace(repo_root)?.is_none() {
+        println!("{}", "Remote: No JJ workspace (run 'tl init' first)".dimmed());
+        return Ok(());
+    }
+
+    // Get remote URL
+    let remote_url = get_git_remote_url(repo_root);
+
+    println!("{}", "Remote Status".bold());
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+
+    match &remote_url {
+        Some(url) => println!("Remote:  {} ({})", "origin".cyan(), url.dimmed()),
+        None => {
+            println!("Remote:  {} {}", "origin".cyan(), "(not configured)".yellow());
+            println!();
+            println!("{}", "No git remote configured. Add one with:".dimmed());
+            println!("  git remote add origin <url>");
+            return Ok(());
+        }
+    }
+    println!();
+
+    // Load workspace and get branch status
+    let workspace = match jj::load_workspace(repo_root) {
+        Ok(ws) => ws,
+        Err(e) => {
+            println!("{} {}", "Error:".red(), e);
+            return Ok(());
+        }
+    };
+
+    let branches = match jj::git_ops::get_remote_branch_updates(&workspace) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("{} {}", "Error fetching remote status:".red(), e);
+            return Ok(());
+        }
+    };
+
+    if branches.is_empty() {
+        println!("  {}", "No snap/* branches tracked".dimmed());
+        println!();
+        println!("{}", "Publish a checkpoint first:".dimmed());
+        println!("  tl publish HEAD");
+        return Ok(());
+    }
+
+    println!("Branches:");
+    for branch in &branches {
+        let status = format_branch_status(branch);
+        let local_id = branch.local_commit_id.as_ref()
+            .map(|s| &s[..12.min(s.len())])
+            .unwrap_or("(none)");
+
+        println!("  {} {} {}",
+            branch.name.cyan(),
+            local_id.dimmed(),
+            status);
+    }
+    println!();
+
+    Ok(())
+}
+
+/// Format branch status as colored string
+fn format_branch_status(branch: &jj::RemoteBranchInfo) -> String {
+    use owo_colors::OwoColorize;
+
+    match (&branch.local_commit_id, &branch.remote_commit_id) {
+        (Some(local), Some(remote)) => {
+            if local == remote {
+                "✓ up to date".green().to_string()
+            } else if branch.is_diverged {
+                format!("{} {} {}",
+                    "↑".yellow(),
+                    "↓".yellow(),
+                    "diverged".red().bold())
+            } else if branch.commits_ahead > 0 {
+                format!("{}{} {}",
+                    "↑".green(),
+                    branch.commits_ahead,
+                    "ahead".green())
+            } else if branch.commits_behind > 0 {
+                format!("{}{} {}",
+                    "↓".yellow(),
+                    branch.commits_behind,
+                    "behind".yellow())
+            } else {
+                // Different commits but we don't know ahead/behind count yet
+                format!("{}", "differs from remote".yellow())
+            }
+        }
+        (Some(_), None) => {
+            format!("{} {}", "↑".green(), "local only".cyan())
+        }
+        (None, Some(_)) => {
+            format!("{} {}", "↓".yellow(), "remote only".yellow())
+        }
+        (None, None) => {
+            "(unknown)".dimmed().to_string()
+        }
+    }
 }

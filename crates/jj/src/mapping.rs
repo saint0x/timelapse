@@ -7,11 +7,17 @@
 //! The mapping enables:
 //! - Finding which JJ commit corresponds to a checkpoint (for incremental publishing)
 //! - Finding which checkpoint corresponds to a JJ commit (for import on pull)
+//! - Storing the seed commit for fast initial publishes
 //! - Verifying mapping integrity
 
 use anyhow::{Context, Result};
 use std::path::Path;
 use ulid::Ulid;
+
+/// Special key for the seed commit mapping.
+/// The seed commit represents the initial repository state at init time,
+/// enabling incremental tree conversion even for the first publish.
+pub const SEED_COMMIT_KEY: &str = "SEED_INIT";
 
 // Note: We alias our core crate as tl_core in Cargo.toml to avoid conflicts with std::core
 
@@ -152,6 +158,66 @@ impl JjMapping {
         self.db.flush()?;
         Ok(())
     }
+
+    /// Store the seed commit ID
+    ///
+    /// The seed commit represents the initial repository state at init time.
+    /// This enables incremental tree conversion for root checkpoints.
+    pub fn set_seed(&self, jj_commit_id: &str) -> Result<()> {
+        self.db.insert(SEED_COMMIT_KEY.as_bytes(), jj_commit_id.as_bytes())
+            .context("Failed to store seed commit mapping")?;
+        self.db.flush()
+            .context("Failed to flush JJ mapping database")?;
+        Ok(())
+    }
+
+    /// Get the seed commit ID
+    ///
+    /// Returns None if no seed commit has been created yet.
+    pub fn get_seed(&self) -> Result<Option<String>> {
+        if let Some(value) = self.db.get(SEED_COMMIT_KEY.as_bytes())
+            .context("Failed to query seed commit")? {
+            let commit_id = String::from_utf8(value.to_vec())
+                .context("Invalid UTF-8 in stored seed commit ID")?;
+            return Ok(Some(commit_id));
+        }
+        Ok(None)
+    }
+
+    /// Check if seed commit exists
+    ///
+    /// Fast check without loading the full commit ID.
+    pub fn has_seed(&self) -> Result<bool> {
+        Ok(self.db.contains_key(SEED_COMMIT_KEY.as_bytes())
+            .context("Failed to check seed commit existence")?)
+    }
+
+    /// Store the seed tree hash (TL tree format)
+    ///
+    /// This is the Timelapse tree hash at init time, used for computing
+    /// tree diffs when publishing without a published parent.
+    pub fn set_seed_tree(&self, tree_hash: &str) -> Result<()> {
+        let key = format!("{}_TREE", SEED_COMMIT_KEY);
+        self.db.insert(key.as_bytes(), tree_hash.as_bytes())
+            .context("Failed to store seed tree hash")?;
+        self.db.flush()
+            .context("Failed to flush JJ mapping database")?;
+        Ok(())
+    }
+
+    /// Get the seed tree hash (TL tree format)
+    ///
+    /// Returns None if no seed tree has been stored.
+    pub fn get_seed_tree(&self) -> Result<Option<String>> {
+        let key = format!("{}_TREE", SEED_COMMIT_KEY);
+        if let Some(value) = self.db.get(key.as_bytes())
+            .context("Failed to query seed tree hash")? {
+            let tree_hash = String::from_utf8(value.to_vec())
+                .context("Invalid UTF-8 in stored seed tree hash")?;
+            return Ok(Some(tree_hash));
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +301,26 @@ mod tests {
         let all = mapping.all_mappings()?;
         assert_eq!(all.len(), 2);
         assert_eq!(mapping.count(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_seed_commit() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mapping = JjMapping::open(temp_dir.path())?;
+
+        // Initially no seed
+        assert!(!mapping.has_seed()?);
+        assert_eq!(mapping.get_seed()?, None);
+
+        // Set seed
+        let seed_id = "abc123seed456";
+        mapping.set_seed(seed_id)?;
+
+        // Verify seed exists
+        assert!(mapping.has_seed()?);
+        assert_eq!(mapping.get_seed()?, Some(seed_id.to_string()));
 
         Ok(())
     }

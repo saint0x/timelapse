@@ -77,6 +77,17 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
         }
     }
 
+    // Phase 4.6: Create seed commit for fast publishing (background)
+    // This runs in the background so init doesn't block
+    let has_jj = jj_initialized || jj::detect_jj_workspace(&current_dir)?.is_some();
+    if has_jj {
+        let repo_root = current_dir.clone();
+        std::thread::spawn(move || {
+            create_seed_commit_background(&repo_root);
+        });
+        println!("  {} Seed commit creation started (background)", "→".dimmed());
+    }
+
     // Phase 5: Configuration Synchronization
     sync_configurations(&current_dir, git_initialized || git_exists)?;
 
@@ -269,4 +280,31 @@ fn print_success_summary(repo_root: &Path, git_initialized: bool, jj_initialized
         "{}",
         "Happy coding! Your changes are now being tracked.".dimmed()
     );
+}
+
+/// Create seed commit in background thread
+///
+/// This enables fast incremental publishing for the first publish.
+/// Runs in background so init doesn't block.
+fn create_seed_commit_background(repo_root: &Path) {
+    let tl_dir = repo_root.join(".tl");
+
+    match jj::create_and_store_seed(repo_root, &tl_dir) {
+        Ok(commit_id) => {
+            // Log to file since we're in background
+            let log_path = tl_dir.join("logs/seed.log");
+            let _ = std::fs::write(
+                &log_path,
+                format!("Seed commit created: {}\n", &commit_id[..12]),
+            );
+        }
+        Err(e) => {
+            // Non-fatal - old repos can still publish, just slower for first time
+            let log_path = tl_dir.join("logs/seed.log");
+            let _ = std::fs::write(
+                &log_path,
+                format!("Seed commit failed (non-fatal): {}\n", e),
+            );
+        }
+    }
 }

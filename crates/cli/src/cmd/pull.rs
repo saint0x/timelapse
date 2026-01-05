@@ -1,10 +1,20 @@
-//! Pull from Git remote and optionally import to checkpoints (100% Native - No CLI)
+//! Pull from Git remote with auto-stash and working directory sync
+//!
+//! Full workflow:
+//! 1. Check for uncommitted changes
+//! 2. Auto-stash if changes exist
+//! 3. Fetch from remote
+//! 4. Import remote commits as checkpoints
+//! 5. Sync working directory to remote HEAD
+//! 6. Re-apply stash (if any)
 
 use anyhow::{Context, Result};
 use crate::util;
-use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PinManager};
+use crate::cmd::restore::{restore_tree, RestoreResult};
+use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, StashEntry, StashManager};
 use owo_colors::OwoColorize;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tl_core::Store;
 
 pub async fn run(
@@ -13,6 +23,7 @@ pub async fn run(
 ) -> Result<()> {
     // 1. Find repository root
     let repo_root = util::find_repo_root()?;
+    let tl_dir = repo_root.join(".tl");
 
     // Ensure daemon is running
     crate::daemon::ensure_daemon_running().await?;
@@ -22,178 +33,464 @@ pub async fn run(
         anyhow::bail!("No JJ workspace found. Run 'jj git init' first.");
     }
 
-    // 3. Fetch using native git API
+    // 3. Open components
+    let store = Store::open(&repo_root)
+        .context("Failed to open Timelapse store")?;
+    let journal = Journal::open(&tl_dir)
+        .context("Failed to open journal")?;
+    let stash_manager = StashManager::new(&tl_dir);
+    let mapping = jj::JjMapping::open(&tl_dir)
+        .context("Failed to open JJ mapping")?;
+
+    // 4. Check for uncommitted changes and auto-stash
+    let stash_entry = if !fetch_only {
+        check_and_auto_stash(&repo_root, &store, &journal, &stash_manager).await?
+    } else {
+        None
+    };
+
+    // 5. Fetch from remote using native git API
     println!("{}", "Fetching from Git remote...".dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
     jj::git_ops::native_git_fetch(&mut workspace)?;
-
     println!("{} Fetched from remote", "✓".green());
 
+    // If fetch-only mode, stop here
     if fetch_only {
         println!();
-        println!("{}", "Fetch complete. Use 'jj rebase' to integrate changes.".dimmed());
+        println!("{}", "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory.".dimmed());
         return Ok(());
     }
 
-    // 4. Import JJ HEAD as checkpoint
-    println!();
-    println!("{}", "Importing JJ HEAD as checkpoint...".dimmed());
+    // 6. Get remote branch updates
+    let remote_branches = jj::git_ops::get_remote_branch_updates(&workspace)?;
 
-    let tl_dir = repo_root.join(".tl");
-    let store = Store::open(&repo_root)
-        .context("Failed to open Timelapse store")?;
-    let journal = Journal::open(&tl_dir)
-        .context("Failed to open journal")?;
-    let mapping = jj::JjMapping::open(&tl_dir)
-        .context("Failed to open JJ mapping")?;
+    // Find the primary branch to sync to (prefer snap/main, then snap/HEAD)
+    let sync_branch = remote_branches.iter()
+        .find(|b| b.name == "snap/main")
+        .or_else(|| remote_branches.iter().find(|b| b.name == "snap/HEAD"))
+        .or_else(|| remote_branches.first());
 
-    match import_jj_head(&workspace, &tl_dir, &store, &journal, &mapping, no_pin)? {
-        ImportResult::AlreadyImported(checkpoint_id) => {
-            println!("{} JJ HEAD already imported as checkpoint {}", "✓".green(), checkpoint_id.bright_cyan());
+    let sync_branch = match sync_branch {
+        Some(b) => b,
+        None => {
+            println!("{}", "No snap/* branches found on remote.".dimmed());
+            // Try to re-apply stash even if no remote branches
+            if let Some(stash) = stash_entry {
+                reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
+            }
+            return Ok(());
         }
-        ImportResult::NewCheckpoint(checkpoint_id, jj_commit_id) => {
-            let short_commit = if jj_commit_id.len() >= 12 {
-                &jj_commit_id[..12]
-            } else {
-                &jj_commit_id
-            };
-            println!("{} Imported JJ commit {} as checkpoint {}",
-                "✓".green(),
-                short_commit.bright_yellow(),
-                checkpoint_id.bright_cyan()
-            );
+    };
 
-            if !no_pin {
-                println!("{} Auto-pinned as {}", "✓".green(), "imported".bright_magenta());
+    let remote_commit_id = match &sync_branch.remote_commit_id {
+        Some(id) => id.clone(),
+        None => {
+            println!("{} Remote branch {} has no commit", "!".yellow(), sync_branch.name);
+            if let Some(stash) = stash_entry {
+                reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
+            }
+            return Ok(());
+        }
+    };
+
+    // 7. Check if already imported
+    if let Some(checkpoint_id) = mapping.get_checkpoint(&remote_commit_id)? {
+        let short_id = &checkpoint_id.to_string()[..8];
+        println!("{} Already up to date (checkpoint {})", "✓".green(),
+            short_id.bright_cyan());
+    } else {
+        // 8. Import remote commit as checkpoint
+        println!();
+        println!("{}", "Importing remote changes...".dimmed());
+
+        let checkpoint = import_remote_commit(
+            &workspace,
+            &remote_commit_id,
+            &store,
+            &journal,
+            &mapping,
+            no_pin,
+            &tl_dir,
+        )?;
+
+        let short_commit = &remote_commit_id[..12.min(remote_commit_id.len())];
+        let short_cp_id = &checkpoint.id.to_string()[..8];
+        println!("{} Imported {} as checkpoint {}",
+            "✓".green(),
+            short_commit.bright_yellow(),
+            short_cp_id.bright_cyan()
+        );
+
+        // 9. Sync working directory to imported checkpoint
+        println!();
+        println!("{}", "Syncing working directory...".dimmed());
+
+        let tree = store.read_tree(checkpoint.root_tree)?;
+        let result = restore_tree(&store, &tree, &repo_root, true)?;
+
+        println!("{} Synced {} files", "✓".green(), result.files_restored.to_string().green());
+        if result.files_deleted > 0 {
+            println!("  {} files removed (not in remote)", result.files_deleted.to_string().dimmed());
+        }
+        if !result.errors.is_empty() {
+            println!("{} {} errors during sync", "!".yellow(), result.errors.len());
+            for err in result.errors.iter().take(3) {
+                println!("  {}", err.dimmed());
             }
         }
-        ImportResult::EmptyRepository => {
-            println!("{}", "Repository is empty, nothing to import".dimmed());
-        }
     }
+
+    // 10. Re-apply stash if we had uncommitted changes
+    if let Some(stash) = stash_entry {
+        reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
+    }
+
+    println!();
+    println!("{}", "Pull complete.".dimmed());
 
     Ok(())
 }
 
-/// Result of importing JJ HEAD
-enum ImportResult {
-    /// Checkpoint already exists for this JJ commit
-    AlreadyImported(ulid::Ulid),
-    /// Created new checkpoint
-    NewCheckpoint(ulid::Ulid, String),
-    /// Repository is empty
-    EmptyRepository,
-}
-
-/// Import JJ HEAD commit as a checkpoint
-fn import_jj_head(
-    workspace: &jj_lib::workspace::Workspace,
-    tl_dir: &Path,
+/// Check for uncommitted changes and auto-stash if found
+async fn check_and_auto_stash(
+    repo_root: &Path,
     store: &Store,
     journal: &Journal,
-    mapping: &jj::JjMapping,
-    no_pin: bool,
-) -> Result<ImportResult> {
-    // 1. Get JJ HEAD commit ID using native API
-    let jj_commit_id = get_jj_head_commit_id_native(workspace)?;
+    stash_manager: &StashManager,
+) -> Result<Option<StashEntry>> {
+    // Get latest checkpoint
+    let latest = match journal.latest()? {
+        Some(cp) => cp,
+        None => return Ok(None), // No checkpoints yet, nothing to stash
+    };
 
-    // Handle empty repository
-    if jj_commit_id.is_empty() || jj_commit_id == "0000000000000000000000000000000000000000" {
-        return Ok(ImportResult::EmptyRepository);
+    // Check if working directory differs from latest checkpoint
+    let has_changes = check_working_dir_changes(repo_root, store, &latest)?;
+
+    if !has_changes {
+        return Ok(None);
     }
 
-    // 2. Check if already mapped
-    if let Some(checkpoint_id) = mapping.get_checkpoint(&jj_commit_id)? {
-        return Ok(ImportResult::AlreadyImported(checkpoint_id));
+    println!("{}", "Auto-stashing uncommitted changes...".dimmed());
+
+    // Force a checkpoint of current state
+    // The daemon will create this, but we need to wait for it
+    // For now, we'll create a manual checkpoint
+    let stash_checkpoint = create_stash_checkpoint(repo_root, store, journal)?;
+
+    // Create stash entry
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis() as u64;
+
+    let entry = StashEntry {
+        checkpoint_id: stash_checkpoint.id,
+        created_at_ms: now_ms,
+        message: Some("Auto-stash before pull".to_string()),
+        base_checkpoint_id: latest.parent,
+    };
+
+    stash_manager.push(entry.clone())?;
+
+    let short_stash_id = &stash_checkpoint.id.to_string()[..8];
+    println!("{} Stashed changes in checkpoint {}",
+        "✓".green(),
+        short_stash_id.bright_cyan()
+    );
+
+    Ok(Some(entry))
+}
+
+/// Check if working directory has changes compared to checkpoint
+fn check_working_dir_changes(
+    repo_root: &Path,
+    store: &Store,
+    checkpoint: &Checkpoint,
+) -> Result<bool> {
+    use std::collections::HashSet;
+
+    let tree = store.read_tree(checkpoint.root_tree)?;
+
+    // Get all files in checkpoint
+    let checkpoint_files: HashSet<String> = tree.entries_with_paths()
+        .filter_map(|(path_bytes, _)| {
+            std::str::from_utf8(path_bytes).ok().map(|s| s.to_string())
+        })
+        .collect();
+
+    // Walk working directory and check for differences
+    for entry in walkdir::WalkDir::new(repo_root)
+        .into_iter()
+        .filter_entry(|e| {
+            let path = e.path();
+            let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+            // Skip hidden directories
+            !name.starts_with('.') || path == repo_root
+        })
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let rel_path = match path.strip_prefix(repo_root) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+
+        // Skip protected paths
+        if rel_path.starts_with(".tl/") || rel_path.starts_with(".git/") || rel_path.starts_with(".jj/") {
+            continue;
+        }
+
+        // Check if file exists in checkpoint
+        if !checkpoint_files.contains(&rel_path) {
+            return Ok(true); // New file
+        }
+
+        // Check if file content differs
+        if let Some(checkpoint_entry) = tree.get(std::path::Path::new(&rel_path)) {
+            let current_hash = tl_core::hash::hash_file(path)?;
+            if current_hash != checkpoint_entry.blob_hash {
+                return Ok(true); // Modified file
+            }
+        }
     }
 
-    // 3. Export JJ commit to temp directory using native API
-    let temp_dir = tempfile::tempdir()
-        .context("Failed to create temporary directory")?;
+    // Check for deleted files
+    for file in &checkpoint_files {
+        let full_path = repo_root.join(file);
+        if !full_path.exists() {
+            return Ok(true); // Deleted file
+        }
+    }
 
-    export_jj_commit_to_dir_native(workspace, temp_dir.path())?;
+    Ok(false)
+}
 
-    // 4. Import directory as checkpoint
-    let (root_tree, files_changed) = import_directory_to_store(temp_dir.path(), store)?;
+/// Create a checkpoint of current working directory state (for stash)
+fn create_stash_checkpoint(
+    repo_root: &Path,
+    store: &Store,
+    journal: &Journal,
+) -> Result<Checkpoint> {
+    use tl_core::{Entry, Tree};
 
-    // 5. Get parent checkpoint (current HEAD)
+    let mut tree = Tree::new();
+    let mut files_changed = 0u32;
+
+    // Walk working directory
+    for entry in walkdir::WalkDir::new(repo_root)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with('.')
+        })
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let rel_path = match path.strip_prefix(repo_root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Hash and store blob
+        let blob_hash = tl_core::hash::hash_file(path)?;
+
+        if !store.blob_store().has_blob(blob_hash) {
+            let content = std::fs::read(path)?;
+            store.blob_store().write_blob(blob_hash, &content)?;
+        }
+
+        // Get file mode
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::MetadataExt;
+            entry.metadata()?.mode()
+        };
+        #[cfg(not(unix))]
+        let mode = 0o644;
+
+        tree.insert(rel_path, Entry::file(mode, blob_hash));
+        files_changed += 1;
+    }
+
+    // Store tree
+    let tree_hash = tree.hash();
+    store.write_tree(&tree)?;
+
+    // Create checkpoint
     let parent = journal.latest()?.map(|cp| cp.id);
-
-    // 6. Create checkpoint
     let checkpoint = Checkpoint::new(
         parent,
-        root_tree,
-        CheckpointReason::Publish, // JJ imports are considered "publish" operations
-        vec![], // We don't track individual touched paths for full imports
+        tree_hash,
+        CheckpointReason::Manual, // Stash is considered manual
+        vec![],
         CheckpointMeta {
             files_changed,
-            bytes_added: 0, // Not tracked for imports
+            bytes_added: 0,
             bytes_removed: 0,
         },
     );
 
-    // 7. Write checkpoint to journal
     journal.append(&checkpoint)?;
 
-    // 8. Store bidirectional mapping
-    mapping.set(checkpoint.id, &jj_commit_id)?;
-    mapping.set_reverse(&jj_commit_id, checkpoint.id)?;
+    Ok(checkpoint)
+}
 
-    // 9. Auto-pin if requested
+/// Import a remote JJ commit as a TL checkpoint
+fn import_remote_commit(
+    workspace: &jj_lib::workspace::Workspace,
+    commit_id: &str,
+    store: &Store,
+    journal: &Journal,
+    mapping: &jj::JjMapping,
+    no_pin: bool,
+    tl_dir: &Path,
+) -> Result<Checkpoint> {
+    use journal::PinManager;
+
+    // Export JJ commit to temp directory
+    let temp_dir = tempfile::tempdir()
+        .context("Failed to create temporary directory")?;
+
+    jj::git_ops::export_commit_to_dir(workspace, commit_id, temp_dir.path())?;
+
+    // Import directory as checkpoint
+    let (root_tree, files_changed) = import_directory_to_store(temp_dir.path(), store)?;
+
+    // Get parent checkpoint
+    let parent = journal.latest()?.map(|cp| cp.id);
+
+    // Create checkpoint
+    let checkpoint = Checkpoint::new(
+        parent,
+        root_tree,
+        CheckpointReason::Publish, // Imported from remote
+        vec![],
+        CheckpointMeta {
+            files_changed,
+            bytes_added: 0,
+            bytes_removed: 0,
+        },
+    );
+
+    // Write to journal
+    journal.append(&checkpoint)?;
+
+    // Store bidirectional mapping
+    mapping.set(checkpoint.id, commit_id)?;
+    mapping.set_reverse(commit_id, checkpoint.id)?;
+
+    // Auto-pin if requested
     if !no_pin {
         let pin_manager = PinManager::new(tl_dir);
-        pin_manager.pin("imported", checkpoint.id)?;
+        pin_manager.pin("pulled", checkpoint.id)?;
     }
 
-    Ok(ImportResult::NewCheckpoint(checkpoint.id, jj_commit_id))
+    Ok(checkpoint)
 }
 
-/// Get JJ HEAD commit ID using native API
-fn get_jj_head_commit_id_native(workspace: &jj_lib::workspace::Workspace) -> Result<String> {
-    use jj_lib::backend::ObjectId;
-    use jj_lib::repo::Repo;
-
-    let config = config::Config::builder().build()?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
-        .context("Failed to load repository")?;
-
-    let wc_commit_id = repo.view()
-        .get_wc_commit_id(workspace.workspace_id())
-        .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
-
-    Ok(wc_commit_id.hex())
-}
-
-/// Export JJ commit files to a directory using native API
-fn export_jj_commit_to_dir_native(
-    workspace: &jj_lib::workspace::Workspace,
-    target_dir: &Path,
+/// Re-apply stashed changes after pull
+async fn reapply_stash(
+    repo_root: &Path,
+    store: &Store,
+    journal: &Journal,
+    stash_manager: &StashManager,
+    stash: StashEntry,
 ) -> Result<()> {
-    use jj_lib::repo::Repo;
+    println!();
+    println!("{}", "Re-applying stashed changes...".dimmed());
 
-    let config = config::Config::builder().build()?;
-    let user_settings = jj_lib::settings::UserSettings::from_config(config);
-    let repo = workspace.repo_loader().load_at_head(&user_settings)
-        .context("Failed to load repository")?;
+    // Get the stash checkpoint
+    let stash_checkpoint = journal.get(&stash.checkpoint_id)?
+        .ok_or_else(|| anyhow::anyhow!("Stash checkpoint not found"))?;
 
-    let wc_commit_id = repo.view()
-        .get_wc_commit_id(workspace.workspace_id())
-        .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
+    // Get current state (after pull)
+    let current = journal.latest()?
+        .ok_or_else(|| anyhow::anyhow!("No current checkpoint"))?;
 
-    let commit = repo.store().get_commit(wc_commit_id)
-        .context("Failed to get working copy commit")?;
+    // Simple approach: restore stash on top of current
+    // TODO: Implement proper 3-way merge for conflicts
+    let stash_tree = store.read_tree(stash_checkpoint.root_tree)?;
+    let current_tree = store.read_tree(current.root_tree)?;
 
-    let tree_id = commit.tree_id();
+    // Find files that were changed in stash but not in remote
+    let mut reapplied = 0;
+    let mut conflicts = Vec::new();
 
-    // REUSE existing export.rs function - already tested!
-    jj::export::export_jj_tree_to_dir(
-        repo.store(),
-        tree_id,
-        target_dir,
-    )?;
+    for (path_bytes, stash_entry) in stash_tree.entries_with_paths() {
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Skip protected paths
+        if path_str.starts_with(".tl/") || path_str.starts_with(".git/") || path_str.starts_with(".jj/") {
+            continue;
+        }
+
+        let file_path = repo_root.join(path_str);
+
+        // Check if current (pulled) state has this file
+        if let Some(current_entry) = current_tree.get(std::path::Path::new(path_str)) {
+            // Both have the file - check for conflict
+            if stash_entry.blob_hash != current_entry.blob_hash {
+                // File differs between stash and pulled - potential conflict
+                // For now, stash wins (user's local changes take precedence)
+                conflicts.push(path_str.to_string());
+            }
+        }
+
+        // Apply stash entry
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = store.blob_store().read_blob(stash_entry.blob_hash)?;
+        std::fs::write(&file_path, content)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(stash_entry.mode);
+            std::fs::set_permissions(&file_path, permissions)?;
+        }
+
+        reapplied += 1;
+    }
+
+    // Remove the stash
+    stash_manager.pop()?;
+
+    println!("{} Re-applied {} files from stash", "✓".green(), reapplied.to_string().green());
+
+    if !conflicts.is_empty() {
+        println!("{} {} files had both local and remote changes (local wins):",
+            "!".yellow(), conflicts.len());
+        for path in conflicts.iter().take(5) {
+            println!("  {}", path.dimmed());
+        }
+        if conflicts.len() > 5 {
+            println!("  ... and {} more", conflicts.len() - 5);
+        }
+    }
 
     Ok(())
 }

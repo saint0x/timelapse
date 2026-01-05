@@ -19,7 +19,7 @@ pub use checkpoint::{Checkpoint, CheckpointMeta, CheckpointReason};
 pub use journal::{Journal, IntegrityReport, RepairResult};
 pub use pathmap::PathMap;
 pub use incremental::incremental_update;
-pub use retention::{GarbageCollector, GcMetrics, PinManager, RetentionPolicy};
+pub use retention::{GarbageCollector, GcMetrics, PinManager, RetentionPolicy, StashEntry, StashManager};
 pub use recovery::recover_on_startup;
 
 /// Result type for journal operations

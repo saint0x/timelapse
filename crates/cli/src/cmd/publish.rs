@@ -3,10 +3,12 @@
 use anyhow::{anyhow, Context, Result};
 use crate::util;
 use owo_colors::OwoColorize;
+use std::collections::HashSet;
 use tl_core::Store;
-use journal::PinManager;
+use journal::{Checkpoint, PinManager};
 use jj::{JjMapping, publish};
 use jj::materialize::{CommitMessageOptions, PublishOptions};
+use ulid::Ulid;
 
 pub async fn run(
     checkpoint_ref: &str,
@@ -75,6 +77,11 @@ pub async fn run(
             anyhow::bail!("Some checkpoints already published");
         }
     }
+
+    // 5.5 Smart chain publishing: find nearest published ancestor
+    // If ancestor is within MAX_GAP checkpoints, publish the minimal chain
+    // Otherwise, use tree-diff fallback for efficiency
+    let checkpoints = smart_chain_publish(checkpoints, &mapping, &tl_dir).await?;
 
     // 6. Configure publish options
     let mut msg_options = CommitMessageOptions::default();
@@ -186,4 +193,134 @@ async fn parse_checkpoint_range(
 
     checkpoints.reverse(); // Oldest first
     Ok(checkpoints)
+}
+
+/// Maximum gap between checkpoints before falling back to tree-diff
+/// Publishing 10 checkpoints is fast (~100ms), beyond that use tree-diff
+const MAX_CHAIN_GAP: usize = 10;
+
+/// Smart chain publishing: find nearest published ancestor and publish minimal chain
+///
+/// Algorithm:
+/// 1. For each checkpoint, find nearest published ancestor (NPA)
+/// 2. If NPA within MAX_CHAIN_GAP: publish minimal chain from NPA to checkpoint
+/// 3. If NPA too distant or not found: mark checkpoint for tree-diff fallback
+///
+/// This avoids publishing entire history (slow) while ensuring correct incremental conversion.
+async fn smart_chain_publish(
+    requested: Vec<Checkpoint>,
+    mapping: &JjMapping,
+    tl_dir: &std::path::Path,
+) -> Result<Vec<Checkpoint>> {
+    // Track what we already have in the result set
+    let mut in_result: HashSet<Ulid> = requested.iter().map(|cp| cp.id).collect();
+    let mut ancestors_to_prepend: Vec<Checkpoint> = Vec::new();
+
+    // For each checkpoint, find nearest published ancestor
+    for checkpoint in &requested {
+        // Skip if this checkpoint is already published
+        if mapping.get_jj_commit(checkpoint.id)?.is_some() {
+            continue;
+        }
+
+        // Find nearest published ancestor within MAX_CHAIN_GAP
+        let (chain, _npa_found) = find_chain_to_published_ancestor(
+            checkpoint,
+            mapping,
+            tl_dir,
+            MAX_CHAIN_GAP,
+            &in_result,
+        ).await?;
+
+        // Add ancestors to prepend list (avoiding duplicates)
+        for ancestor in chain {
+            if !in_result.contains(&ancestor.id) {
+                in_result.insert(ancestor.id);
+                ancestors_to_prepend.push(ancestor);
+            }
+        }
+    }
+
+    // Sort ancestors by walking from roots to leaves (oldest first)
+    // This ensures publishing happens in topological order
+    ancestors_to_prepend.sort_by_key(|cp| cp.id); // ULID is time-ordered
+
+    // Report what we're doing
+    let ancestor_count = ancestors_to_prepend.len();
+    if ancestor_count > 0 {
+        println!("{} Including {} ancestor(s) for fast incremental publish",
+            "→".cyan(),
+            ancestor_count.to_string().yellow()
+        );
+    }
+
+    // Combine: ancestors first, then requested checkpoints
+    let mut result = ancestors_to_prepend;
+    result.extend(requested);
+
+    Ok(result)
+}
+
+/// Find the chain of unpublished checkpoints from target back to nearest published ancestor
+///
+/// Returns (chain, npa_found):
+/// - chain: checkpoints to publish (oldest first), empty if parent is published
+/// - npa_found: true if we found a published ancestor within max_depth
+async fn find_chain_to_published_ancestor(
+    checkpoint: &Checkpoint,
+    mapping: &JjMapping,
+    tl_dir: &std::path::Path,
+    max_depth: usize,
+    already_included: &HashSet<Ulid>,
+) -> Result<(Vec<Checkpoint>, bool)> {
+    let mut chain: Vec<Checkpoint> = Vec::new();
+    let mut current = checkpoint.clone();
+    let mut depth = 0;
+
+    loop {
+        // Check if we've exceeded max depth
+        if depth >= max_depth {
+            // Too deep - clear chain, will use tree-diff fallback
+            return Ok((Vec::new(), false));
+        }
+
+        // Get parent
+        let parent_id = match current.parent {
+            Some(id) => id,
+            None => {
+                // Root checkpoint - use seed as base (handled in materialize.rs)
+                // Return collected chain so far
+                chain.reverse();
+                return Ok((chain, true));
+            }
+        };
+
+        // Check if parent is already in our publish set
+        if already_included.contains(&parent_id) {
+            // Parent will be published - we're good
+            chain.reverse();
+            return Ok((chain, true));
+        }
+
+        // Check if parent is already published to JJ
+        if mapping.get_jj_commit(parent_id)?.is_some() {
+            // Found published ancestor - return chain
+            chain.reverse();
+            return Ok((chain, true));
+        }
+
+        // Parent not published - add to chain and continue walking back
+        let parent_checkpoints = crate::data_access::get_checkpoints(&[parent_id], tl_dir).await?;
+        let parent = match &parent_checkpoints[0] {
+            Some(cp) => cp.clone(),
+            None => {
+                // Parent not found (possibly GC'd) - use tree-diff fallback
+                return Ok((Vec::new(), false));
+            }
+        };
+
+        chain.push(parent.clone());
+        current = parent;
+        depth += 1;
+    }
 }

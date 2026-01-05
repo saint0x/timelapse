@@ -340,8 +340,13 @@ pub fn publish_checkpoint(
     let mut_repo = tx.mut_repo();
     let jj_store = Repo::store(mut_repo);
 
+    // Load the current checkpoint's tree first (needed for tree diff computation)
+    let tree = store.read_tree(checkpoint.root_tree)
+        .context("Failed to read checkpoint tree")?;
+
     // Determine parent commits and get parent's JJ tree for incremental conversion
-    let (parent_ids, parent_jj_tree_id): (Vec<_>, Option<jj_lib::backend::TreeId>) =
+    // Also track whether we're using true parent (touched_paths valid) or seed fallback (need tree diff)
+    let (parent_ids, parent_jj_tree_id, use_true_parent): (Vec<_>, Option<jj_lib::backend::TreeId>, bool) =
         if let Some(parent_cp_id) = checkpoint.parent {
             // Parent checkpoint exists - check if it's published to JJ
             if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
@@ -359,26 +364,65 @@ pub fn publish_checkpoint(
                     Err(_) => None, // Can't get commit, fall back to full conversion
                 };
 
-                (vec![parent_commit_id], parent_tree_id)
+                (vec![parent_commit_id], parent_tree_id, true) // True parent: touched_paths valid
             } else {
-                // Parent not published, use current @, no incremental possible
+                // Parent not published - use seed tree as fallback (need tree diff)
                 let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_id())
                     .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
-                (vec![wc_commit_id.clone()], None)
+
+                let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+                    let seed_commit_id = jj_lib::backend::CommitId::from_hex(&seed_commit_id_str);
+                    match jj_store.get_commit(&seed_commit_id) {
+                        Ok(seed_commit) => {
+                            match seed_commit.tree_id() {
+                                MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
+                                MergedTreeId::Merge(_) => None,
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                });
+                (vec![wc_commit_id.clone()], seed_tree_id, false) // Seed fallback: need tree diff
             }
         } else {
-            // Root checkpoint - use root commit as parent, no incremental possible
-            (vec![Repo::store(mut_repo).root_commit_id().clone()], None)
+            // Root checkpoint - try to use seed commit for incremental conversion
+            let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+                let seed_commit_id = jj_lib::backend::CommitId::from_hex(&seed_commit_id_str);
+                match jj_store.get_commit(&seed_commit_id) {
+                    Ok(seed_commit) => {
+                        match seed_commit.tree_id() {
+                            MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
+                            MergedTreeId::Merge(_) => None,
+                        }
+                    }
+                    Err(_) => None,
+                }
+            });
+            (vec![Repo::store(mut_repo).root_commit_id().clone()], seed_tree_id, false) // Seed fallback: need tree diff
         };
 
+    // Determine which paths to process for incremental conversion
+    // - If true parent: use checkpoint.touched_paths (paths changed from parent)
+    // - If seed fallback: compute tree diff between seed and current (all changes since init)
+    let effective_touched_paths: Vec<PathBuf> = if use_true_parent {
+        // True parent is published - touched_paths are correct
+        checkpoint.touched_paths.clone()
+    } else if parent_jj_tree_id.is_some() {
+        // Using seed as base - compute full tree diff
+        // Load seed's TL tree to compare with current tree
+        let seed_tree = load_seed_tree(store, mapping)?;
+        compute_tree_diff_paths(&seed_tree, &tree)
+    } else {
+        // No seed available - full conversion will be used
+        Vec::new()
+    };
+
     // Convert Timelapse tree to JJ tree (incremental if possible)
-    let tree = store.read_tree(checkpoint.root_tree)
-        .context("Failed to read checkpoint tree")?;
     let jj_tree_id = convert_tree_to_jj_incremental(
         &tree,
         store,
         jj_store,
-        &checkpoint.touched_paths,
+        &effective_touched_paths,
         parent_jj_tree_id.as_ref(),
     )?;
 
@@ -451,6 +495,68 @@ pub fn publish_range(
         }
         Ok(commit_ids)
     }
+}
+
+/// Load the seed commit's tree from TL storage
+///
+/// The seed tree represents the initial repository state at init time.
+/// Used for computing tree diff when parent checkpoint isn't published.
+fn load_seed_tree(
+    store: &Store,
+    mapping: &crate::mapping::JjMapping,
+) -> Result<Tree> {
+    // Get seed checkpoint tree hash
+    // Note: We store the seed's root_tree hash during init
+    // For now, we return an empty tree as fallback - the actual seed tree
+    // would need to be stored during init
+
+    // Check if we have a seed tree stored
+    if let Some(seed_tree_hash) = mapping.get_seed_tree()? {
+        // Load the tree from store
+        let hash = tl_core::Sha1Hash::from_hex(&seed_tree_hash)
+            .context("Invalid seed tree hash")?;
+        return store.read_tree(hash)
+            .context("Failed to read seed tree");
+    }
+
+    // No seed tree - return empty tree as fallback
+    // This will cause full tree diff (all files are "added")
+    Ok(Tree::new())
+}
+
+/// Compute the set of paths that differ between two trees
+///
+/// Used when publishing with seed as base - computes all paths that
+/// changed from seed to current checkpoint.
+fn compute_tree_diff_paths(old_tree: &Tree, new_tree: &Tree) -> Vec<PathBuf> {
+    use tl_core::TreeDiff;
+
+    let diff = TreeDiff::diff(old_tree, new_tree);
+
+    let mut paths = Vec::with_capacity(
+        diff.added.len() + diff.removed.len() + diff.modified.len()
+    );
+
+    // Convert SmallVec<[u8; 64]> paths to PathBuf
+    for (path_bytes, _entry) in diff.added {
+        if let Ok(path_str) = std::str::from_utf8(&path_bytes) {
+            paths.push(PathBuf::from(path_str));
+        }
+    }
+
+    for (path_bytes, _entry) in diff.removed {
+        if let Ok(path_str) = std::str::from_utf8(&path_bytes) {
+            paths.push(PathBuf::from(path_str));
+        }
+    }
+
+    for (path_bytes, _old_entry, _new_entry) in diff.modified {
+        if let Ok(path_str) = std::str::from_utf8(&path_bytes) {
+            paths.push(PathBuf::from(path_str));
+        }
+    }
+
+    paths
 }
 
 #[cfg(test)]

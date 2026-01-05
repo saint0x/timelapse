@@ -1,7 +1,13 @@
 //! Push to Git remote via JJ (Native Implementation)
+//!
+//! Features:
+//! - Pre-validates branches before push
+//! - Reports per-branch results
+//! - Clear error messages for diverged branches
 
 use anyhow::{Context, Result};
 use crate::util;
+use jj::git_ops::{BranchPushResult, BranchPushStatus};
 use owo_colors::OwoColorize;
 
 pub async fn run(
@@ -30,21 +36,48 @@ pub async fn run(
         b.strip_prefix("snap/").unwrap_or(b)
     });
 
-    // Execute native git push
-    jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;
+    // Execute native git push (now returns detailed results)
+    let results = jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;
 
-    // 4. Success - display what was pushed
-    println!("{} Pushed to remote", "✓".green());
+    // 4. Display results
+    let pushed_count = results.iter()
+        .filter(|r| r.status == BranchPushStatus::Pushed)
+        .count();
+    let up_to_date_count = results.iter()
+        .filter(|r| r.status == BranchPushStatus::UpToDate)
+        .count();
 
-    if let Some(ref b) = bookmark {
-        let display_name = if b.starts_with("snap/") {
-            b.clone()
-        } else {
-            format!("snap/{}", b)
-        };
-        println!("  Bookmark: {}", display_name.cyan());
-    } else if all {
-        println!("  All bookmarks pushed");
+    if pushed_count == 0 && up_to_date_count > 0 {
+        println!("{} Already up to date", "✓".green());
+    } else if pushed_count > 0 {
+        println!("{} Pushed {} bookmark(s) to remote", "✓".green(), pushed_count.to_string().green());
+    }
+
+    // Show per-branch details
+    for result in &results {
+        match &result.status {
+            BranchPushStatus::Pushed => {
+                let old = result.old_commit.as_ref()
+                    .map(|s| &s[..12.min(s.len())])
+                    .unwrap_or("(new)");
+                let new = result.new_commit.as_ref()
+                    .map(|s| &s[..12.min(s.len())])
+                    .unwrap_or("???");
+                println!("  {} {} → {}", result.name.cyan(), old.dimmed(), new.green());
+            }
+            BranchPushStatus::UpToDate => {
+                println!("  {} {}", result.name.cyan(), "(up to date)".dimmed());
+            }
+            BranchPushStatus::Diverged => {
+                println!("  {} {}", result.name.cyan(), "DIVERGED (use --force)".red());
+            }
+            BranchPushStatus::Rejected(reason) => {
+                println!("  {} {} {}", result.name.cyan(), "REJECTED:".red(), reason);
+            }
+            BranchPushStatus::Skipped => {
+                println!("  {} {}", result.name.cyan(), "(skipped)".dimmed());
+            }
+        }
     }
 
     Ok(())

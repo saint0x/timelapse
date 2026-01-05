@@ -24,7 +24,21 @@
 
 set -e
 
-TL_BINARY="${TL_BINARY:-tl}"
+# Auto-detect release binary, fall back to debug, then system tl
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${TL_BINARY:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/target/aarch64-apple-darwin/release/tl" ]]; then
+        TL_BINARY="$SCRIPT_DIR/target/aarch64-apple-darwin/release/tl"
+    elif [[ -x "$SCRIPT_DIR/target/release/tl" ]]; then
+        TL_BINARY="$SCRIPT_DIR/target/release/tl"
+    elif [[ -x "$SCRIPT_DIR/target/aarch64-apple-darwin/debug/tl" ]]; then
+        TL_BINARY="$SCRIPT_DIR/target/aarch64-apple-darwin/debug/tl"
+    elif [[ -x "$SCRIPT_DIR/target/debug/tl" ]]; then
+        TL_BINARY="$SCRIPT_DIR/target/debug/tl"
+    else
+        TL_BINARY="tl"
+    fi
+fi
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'

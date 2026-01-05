@@ -26,7 +26,7 @@ pub use conflicts::{
     CONFLICT_MARKER_START, CONFLICT_MARKER_END,
 };
 pub use git_ops::{RemoteBranchInfo, BranchPushResult, BranchPushStatus, LocalBranchInfo};
-pub use mapping::JjMapping;
+pub use mapping::{JjMapping, SEED_COMMIT_KEY};
 pub use materialize::{CommitMessageOptions, PublishOptions};
 pub use merge::{
     MergeResult, MergeState, ConflictInfo,
@@ -438,4 +438,107 @@ pub fn forget_workspace_native(
     let _committed_repo = tx.commit(&description);
 
     Ok(())
+}
+
+/// Create a seed commit for fast initial publishes
+///
+/// The seed commit captures the initial repository state at init time.
+/// When publishing root checkpoints (parent=None), we use the seed's tree
+/// as the base for incremental tree conversion, making the first publish
+/// as fast as subsequent publishes.
+///
+/// This function:
+/// 1. Loads the JJ workspace
+/// 2. Gets the current working copy tree (@ commit's tree)
+/// 3. Creates a new "seed" commit with this tree
+/// 4. Returns the commit ID for storage in JjMapping
+///
+/// # Arguments
+///
+/// * `repo_root` - The repository root containing .jj/
+///
+/// # Returns
+///
+/// The hex commit ID of the created seed commit.
+///
+/// # Errors
+///
+/// Returns error if workspace loading or commit creation fails.
+pub fn create_seed_commit(repo_root: &Path) -> Result<String> {
+    use jj_lib::backend::MergedTreeId;
+
+    // Load workspace
+    let workspace = load_workspace(repo_root)?;
+
+    let config = config::Config::builder().build()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repo")?;
+
+    // Get current @ commit's tree
+    let wc_commit_id = Repo::view(repo.as_ref())
+        .get_wc_commit_id(workspace.workspace_id())
+        .ok_or_else(|| JjError::OperationFailed("No working copy commit found".to_string()))?;
+
+    let jj_store = Repo::store(repo.as_ref());
+    let wc_commit = jj_store.get_commit(&wc_commit_id)
+        .context("Failed to get working copy commit")?;
+
+    // Get the tree from working copy
+    let tree_id = match wc_commit.tree_id() {
+        MergedTreeId::Legacy(tree_id) => tree_id.clone(),
+        MergedTreeId::Merge(merged) => {
+            // For merged trees, get the first tree (should be the resolved state)
+            merged.first().clone()
+        }
+    };
+
+    // Create seed commit with:
+    // - Same tree as current @ (captures initial state)
+    // - JJ root as parent (clean lineage)
+    // - Descriptive message
+    let mut tx = repo.start_transaction(&user_settings);
+    let mut_repo = tx.mut_repo();
+
+    let root_commit_id = Repo::store(mut_repo).root_commit_id().clone();
+    let merged_tree_id = MergedTreeId::Legacy(tree_id);
+
+    let seed_commit = mut_repo.new_commit(
+        &user_settings,
+        vec![root_commit_id],
+        merged_tree_id,
+    )
+    .set_description("Timelapse seed: initial repository state\n\nThis commit enables fast incremental publishing.")
+    .write()?;
+
+    let commit_id = seed_commit.id().hex();
+
+    // Commit the transaction
+    tx.commit("create timelapse seed commit");
+
+    Ok(commit_id)
+}
+
+/// Create seed commit and store mapping (convenience function)
+///
+/// Combines `create_seed_commit` with storing the result in JjMapping.
+/// This is the primary function to call during init.
+///
+/// # Arguments
+///
+/// * `repo_root` - The repository root
+/// * `tl_dir` - The .tl directory for JjMapping storage
+///
+/// # Errors
+///
+/// Returns error if seed creation or mapping storage fails.
+pub fn create_and_store_seed(repo_root: &Path, tl_dir: &Path) -> Result<String> {
+    let commit_id = create_seed_commit(repo_root)?;
+
+    let mapping = JjMapping::open(tl_dir)?;
+    mapping.set_seed(&commit_id)?;
+
+    Ok(commit_id)
 }
