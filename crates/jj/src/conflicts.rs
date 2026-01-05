@@ -28,7 +28,7 @@ pub const CONFLICT_MARKER_END: &str = ">>>>>>>";
 /// original content here
 /// =======
 /// remote content here
-/// >>>>>>> REMOTE (snap/main)
+/// >>>>>>> REMOTE (tl/main)
 /// ```
 ///
 /// # Arguments
@@ -37,7 +37,7 @@ pub const CONFLICT_MARKER_END: &str = ">>>>>>>";
 /// * `ours` - Local ("ours") content
 /// * `theirs` - Remote ("theirs") content
 /// * `ours_label` - Label for local side (e.g., "LOCAL" or "HEAD")
-/// * `theirs_label` - Label for remote side (e.g., "REMOTE" or "snap/main")
+/// * `theirs_label` - Label for remote side (e.g., "REMOTE" or "tl/main")
 pub fn write_conflict_markers(
     file_path: &Path,
     base: Option<&[u8]>,

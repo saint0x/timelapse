@@ -60,8 +60,8 @@ pub enum BranchPushStatus {
 ///
 /// # Arguments
 /// * `workspace` - JJ workspace (must be git-backed)
-/// * `bookmark` - Optional bookmark name (will push snap/<bookmark>)
-/// * `all` - Push all snap/* bookmarks
+/// * `bookmark` - Optional bookmark name (will push tl/<bookmark>)
+/// * `all` - Push all tl/* bookmarks
 /// * `force` - Force push (non-fast-forward)
 pub fn native_git_push(
     workspace: &mut Workspace,
@@ -91,10 +91,10 @@ pub fn native_git_push(
     let origin_remote: &RemoteName = "origin".as_ref();
 
     if all {
-        // Collect all snap/* bookmarks
+        // Collect all tl/* bookmarks
         for (bookmark_name, target) in view.local_bookmarks() {
             // Use as_str() to check string properties
-            if bookmark_name.as_str().starts_with("snap/") {
+            if bookmark_name.as_str().starts_with("tl/") {
                 if let Some(local_commit_id) = target.as_normal() {
                     // Create remote symbol for lookup
                     let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
@@ -110,10 +110,10 @@ pub fn native_git_push(
         }
     } else if let Some(bookmark_name) = bookmark {
         // Single bookmark
-        let full_name = if bookmark_name.starts_with("snap/") {
+        let full_name = if bookmark_name.starts_with("tl/") {
             bookmark_name.to_string()
         } else {
-            format!("snap/{}", bookmark_name)
+            format!("tl/{}", bookmark_name)
         };
 
         // Convert to RefName for lookup
@@ -366,7 +366,7 @@ pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
 /// Information about a remote branch
 #[derive(Debug, Clone)]
 pub struct RemoteBranchInfo {
-    /// Branch name (e.g., "snap/main")
+    /// Branch name (e.g., "tl/main")
     pub name: String,
     /// Remote commit ID (hex)
     pub remote_commit_id: Option<String>,
@@ -395,8 +395,8 @@ pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Re
 
     // Iterate through all remote bookmarks for "origin"
     for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
-        // Only look at snap/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("snap/") {
+        // Only look at tl/* branches - use as_str() for string operations
+        if !bookmark_name.as_str().starts_with("tl/") {
             continue;
         }
 
@@ -435,7 +435,7 @@ pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Re
 /// Information about a local branch
 #[derive(Debug, Clone)]
 pub struct LocalBranchInfo {
-    /// Branch name (e.g., "snap/main")
+    /// Branch name (e.g., "tl/main")
     pub name: String,
     /// Commit ID (hex)
     pub commit_id: String,
@@ -458,8 +458,8 @@ pub fn get_local_branches(workspace: &jj_lib::workspace::Workspace) -> Result<Ve
 
     // Iterate through all local bookmarks
     for (bookmark_name, local_ref) in view.local_bookmarks() {
-        // Only show snap/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("snap/") {
+        // Only show tl/* branches - use as_str() for string operations
+        if !bookmark_name.as_str().starts_with("tl/") {
             continue;
         }
 
@@ -507,8 +507,8 @@ pub fn get_remote_only_branches(workspace: &jj_lib::workspace::Workspace) -> Res
 
     // Iterate through all remote bookmarks for "origin"
     for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
-        // Only look at snap/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("snap/") {
+        // Only look at tl/* branches - use as_str() for string operations
+        if !bookmark_name.as_str().starts_with("tl/") {
             continue;
         }
 
@@ -543,11 +543,11 @@ pub fn delete_local_branch(workspace: &mut jj_lib::workspace::Workspace, branch_
     let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
-    // Ensure snap/ prefix
-    let full_name = if branch_name.starts_with("snap/") {
+    // Ensure tl/ prefix
+    let full_name = if branch_name.starts_with("tl/") {
         branch_name.to_string()
     } else {
-        format!("snap/{}", branch_name)
+        format!("tl/{}", branch_name)
     };
 
     // Convert to RefName for API calls
@@ -624,13 +624,13 @@ mod tests {
     #[test]
     fn test_branch_push_result_construction() {
         let result = BranchPushResult {
-            name: "snap/main".to_string(),
+            name: "tl/main".to_string(),
             status: BranchPushStatus::Pushed,
             old_commit: Some("abc123".to_string()),
             new_commit: Some("def456".to_string()),
         };
 
-        assert_eq!(result.name, "snap/main");
+        assert_eq!(result.name, "tl/main");
         assert_eq!(result.status, BranchPushStatus::Pushed);
     }
 }

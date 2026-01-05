@@ -89,7 +89,7 @@ enum Commands {
     Publish {
         /// Checkpoint ID or range (e.g., HEAD or HEAD~10..HEAD)
         checkpoint: String,
-        /// Bookmark name (will be prefixed with snap/)
+        /// Bookmark name (will be prefixed with tl/)
         #[arg(short, long)]
         bookmark: Option<String>,
         /// Compact range into single commit (default: expand)
@@ -104,10 +104,10 @@ enum Commands {
     },
     /// Push to Git remote via JJ
     Push {
-        /// Bookmark name (optional, will be prefixed with snap/)
+        /// Bookmark name (optional, will be prefixed with tl/)
         #[arg(short, long)]
         bookmark: Option<String>,
-        /// Push all snap/* bookmarks
+        /// Push all tl/* bookmarks
         #[arg(long)]
         all: bool,
         /// Force push
@@ -152,7 +152,7 @@ enum Commands {
     },
     /// Merge changes from a branch
     Merge {
-        /// Branch to merge (e.g., snap/main)
+        /// Branch to merge (e.g., tl/main)
         branch: Option<String>,
         /// Abort the in-progress merge
         #[arg(long)]

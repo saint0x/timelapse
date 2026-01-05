@@ -185,7 +185,7 @@ pub fn init_jj_external(repo_root: &Path, git_dir: &Path) -> Result<()> {
 /// Configure JJ bookmarks for optimal timelapse workflow
 ///
 /// Sets up JJ configuration for:
-/// - Bookmark prefix for timelapse snapshots (snap/)
+/// - Bookmark prefix for timelapse snapshots (tl/)
 /// - Default revset for log display
 /// - Empty default commit description
 ///
@@ -199,7 +199,7 @@ pub fn configure_jj_bookmarks(repo_root: &Path) -> Result<()> {
 
     let configs = vec![
         ("revsets.log", "bookmarks() | @"),
-        ("git.push-bookmark-prefix", "snap/"),
+        ("git.push-bookmark-prefix", "tl/"),
         ("ui.default-description", ""),
     ];
 
@@ -239,12 +239,12 @@ pub fn check_jj_binary() -> Result<bool> {
 /// Create a JJ bookmark (branch) using native jj-lib APIs
 ///
 /// Creates a bookmark pointing to the specified commit. The bookmark name
-/// is automatically prefixed with "snap/" if not already prefixed.
+/// is automatically prefixed with "tl/" if not already prefixed.
 ///
 /// # Arguments
 ///
 /// * `workspace` - JJ workspace (must be loaded)
-/// * `bookmark_name` - Name of the bookmark to create (e.g., "feature" or "snap/feature")
+/// * `bookmark_name` - Name of the bookmark to create (e.g., "feature" or "tl/feature")
 /// * `commit_id` - Hex string of the commit ID to point the bookmark at
 ///
 /// # Errors
@@ -267,11 +267,11 @@ pub fn create_bookmark_native(
         .context("Invalid commit ID hex string")?;
     let commit_id = CommitId::from_bytes(&commit_id_bytes);
 
-    // Ensure snap/ prefix
-    let full_name = if bookmark_name.starts_with("snap/") {
+    // Ensure tl/ prefix
+    let full_name = if bookmark_name.starts_with("tl/") {
         bookmark_name.to_string()
     } else {
-        format!("snap/{}", bookmark_name)
+        format!("tl/{}", bookmark_name)
     };
 
     // Start transaction
@@ -298,7 +298,7 @@ pub fn create_bookmark_native(
 /// Configure JJ repository settings using native config APIs
 ///
 /// Sets up JJ configuration for:
-/// - Bookmark prefix for timelapse snapshots (snap/)
+/// - Bookmark prefix for timelapse snapshots (tl/)
 /// - Default revset for log display
 /// - Empty default commit description
 ///
@@ -324,7 +324,7 @@ pub fn configure_jj_native(repo_root: &Path) -> Result<()> {
 log = "bookmarks() | @"
 
 [git]
-push-bookmark-prefix = "snap/"
+push-bookmark-prefix = "tl/"
 
 [ui]
 default-description = ""

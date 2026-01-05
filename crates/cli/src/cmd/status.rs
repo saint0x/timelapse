@@ -158,7 +158,7 @@ fn print_remote_status(repo_root: &Path) -> Result<()> {
     };
 
     if branches.is_empty() {
-        println!("  {}", "No snap/* branches tracked".dimmed());
+        println!("  {}", "No tl/* branches tracked".dimmed());
         println!();
         println!("{}", "Publish a checkpoint first:".dimmed());
         println!("  tl publish HEAD");

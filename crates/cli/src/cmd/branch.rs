@@ -1,6 +1,6 @@
 //! Branch management command
 //!
-//! List, create, and delete branches (JJ bookmarks with snap/ prefix).
+//! List, create, and delete branches (JJ bookmarks with tl/ prefix).
 
 use anyhow::{Context, Result};
 use crate::util;

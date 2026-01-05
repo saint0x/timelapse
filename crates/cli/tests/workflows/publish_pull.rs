@@ -111,10 +111,10 @@ async fn test_publish_single_checkpoint() -> Result<()> {
         "Should confirm publication"
     );
 
-    // Verify auto-bookmark snap/HEAD is created when no explicit bookmark provided
+    // Verify auto-bookmark tl/HEAD is created when no explicit bookmark provided
     assert!(
-        publish_result.stdout.contains("snap/HEAD") || publish_result.stdout.contains("Updated bookmark"),
-        "Should auto-create snap/HEAD bookmark"
+        publish_result.stdout.contains("tl/HEAD") || publish_result.stdout.contains("Updated bookmark"),
+        "Should auto-create tl/HEAD bookmark"
     );
 
     // Performance assertion
@@ -157,10 +157,10 @@ async fn test_publish_head_alias() -> Result<()> {
         "Should confirm publication using HEAD"
     );
 
-    // Verify auto-bookmark snap/HEAD is created
+    // Verify auto-bookmark tl/HEAD is created
     assert!(
-        publish_result.stdout.contains("snap/HEAD"),
-        "Should auto-create snap/HEAD bookmark when publishing HEAD"
+        publish_result.stdout.contains("tl/HEAD"),
+        "Should auto-create tl/HEAD bookmark when publishing HEAD"
     );
 
     Ok(())

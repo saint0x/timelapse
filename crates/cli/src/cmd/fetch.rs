@@ -59,7 +59,7 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
             println!("  {} {} ({})", branch.name.cyan(), remote_id.dimmed(), status);
         }
     } else {
-        println!("{}", "No snap/* branches found on remote".dimmed());
+        println!("{}", "No tl/* branches found on remote".dimmed());
     }
 
     // 6. Handle prune flag

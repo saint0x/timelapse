@@ -57,7 +57,7 @@ pub struct MergeState {
     pub ours_commit: String,
     /// "Theirs" commit ID (target branch)
     pub theirs_commit: String,
-    /// Target branch name (e.g., "snap/main")
+    /// Target branch name (e.g., "tl/main")
     pub theirs_branch: String,
     /// Base commit ID (common ancestor)
     pub base_commit: Option<String>,
@@ -124,11 +124,11 @@ pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<
 
     let view = repo.view();
 
-    // Ensure snap/ prefix
-    let full_name = if branch_name.starts_with("snap/") {
+    // Ensure tl/ prefix
+    let full_name = if branch_name.starts_with("tl/") {
         branch_name.to_string()
     } else {
-        format!("snap/{}", branch_name)
+        format!("tl/{}", branch_name)
     };
 
     // Get local bookmark target (branches are now called bookmarks)
@@ -185,7 +185,7 @@ pub fn find_merge_base(workspace: &Workspace, commit1_hex: &str, commit2_hex: &s
 ///
 /// # Arguments
 /// * `workspace` - JJ workspace
-/// * `target_branch` - Branch to merge (e.g., "snap/main" or "main")
+/// * `target_branch` - Branch to merge (e.g., "tl/main" or "main")
 ///
 /// # Returns
 /// MergeResult with merged tree and conflict information
@@ -201,10 +201,10 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
 
     // 2. Get target branch commit ("theirs")
     let theirs_id = {
-        let full_name = if target_branch.starts_with("snap/") {
+        let full_name = if target_branch.starts_with("tl/") {
             target_branch.to_string()
         } else {
-            format!("snap/{}", target_branch)
+            format!("tl/{}", target_branch)
         };
 
         let ref_name: &RefName = full_name.as_ref();
@@ -358,7 +358,7 @@ mod tests {
             in_progress: true,
             ours_commit: "abc123".to_string(),
             theirs_commit: "def456".to_string(),
-            theirs_branch: "snap/main".to_string(),
+            theirs_branch: "tl/main".to_string(),
             base_commit: Some("789abc".to_string()),
             conflicts: vec!["src/main.rs".to_string()],
             pre_merge_checkpoint: "01KE77BC".to_string(),
