@@ -34,7 +34,11 @@ enum Commands {
         skip_jj: bool,
     },
     /// Show daemon and checkpoint status
-    Status,
+    Status {
+        /// Show remote branch status (ahead/behind)
+        #[arg(short, long)]
+        remote: bool,
+    },
     /// Show detailed repository information
     Info,
     /// Show checkpoint timeline
@@ -119,6 +123,56 @@ enum Commands {
         #[arg(long)]
         no_pin: bool,
     },
+    /// Fetch from Git remote and sync working directory
+    Fetch {
+        /// Don't sync working directory after fetch
+        #[arg(long)]
+        no_sync: bool,
+        /// Remove branches that have been deleted on remote
+        #[arg(long)]
+        prune: bool,
+    },
+    /// List, create, or delete branches
+    Branch {
+        /// Show remote branches
+        #[arg(short, long)]
+        remote: bool,
+        /// Show all branches (local + remote)
+        #[arg(short, long)]
+        all: bool,
+        /// Delete a branch
+        #[arg(short, long)]
+        delete: Option<String>,
+        /// Branch name to create (requires checkpoint argument)
+        #[arg(long)]
+        create: Option<String>,
+        /// Checkpoint to create branch at (used with --create)
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// Merge changes from a branch
+    Merge {
+        /// Branch to merge (e.g., snap/main)
+        branch: Option<String>,
+        /// Abort the in-progress merge
+        #[arg(long)]
+        abort: bool,
+        /// Continue merge after resolving conflicts
+        #[arg(long = "continue")]
+        continue_merge: bool,
+    },
+    /// Check and manage conflict resolution
+    Resolve {
+        /// List files with resolution status
+        #[arg(short, long)]
+        list: bool,
+        /// Continue merge after resolving (shortcut for merge --continue)
+        #[arg(long = "continue")]
+        continue_merge: bool,
+        /// Abort merge (shortcut for merge --abort)
+        #[arg(long)]
+        abort: bool,
+    },
     /// Start the daemon
     Start {
         /// Run in foreground (for debugging)
@@ -187,7 +241,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { skip_git, skip_jj } => cmd::init::run(skip_git, skip_jj).await,
-        Commands::Status => cmd::status::run().await,
+        Commands::Status { remote } => cmd::status::run(remote).await,
         Commands::Info => cmd::info::run().await,
         Commands::Log { limit } => cmd::log::run(limit).await,
         Commands::Diff { checkpoint_a, checkpoint_b, patch, context, max_files } => {
@@ -205,6 +259,24 @@ async fn main() -> Result<()> {
         }
         Commands::Pull { fetch_only, no_pin } => {
             cmd::pull::run(fetch_only, no_pin).await
+        }
+        Commands::Fetch { no_sync, prune } => {
+            cmd::fetch::run(no_sync, prune).await
+        }
+        Commands::Branch { remote, all, delete, create, at } => {
+            let create_pair = match (create, at) {
+                (Some(name), Some(checkpoint)) => Some((name, checkpoint)),
+                (Some(_), None) => anyhow::bail!("--create requires --at <checkpoint>"),
+                (None, Some(_)) => anyhow::bail!("--at requires --create <branch-name>"),
+                (None, None) => None,
+            };
+            cmd::branch::run(remote, all, delete, create_pair).await
+        }
+        Commands::Merge { branch, abort, continue_merge } => {
+            cmd::merge::run(branch, abort, continue_merge).await
+        }
+        Commands::Resolve { list, continue_merge, abort } => {
+            cmd::resolve::run(list, continue_merge, abort).await
         }
         Commands::Start { foreground } => cmd::start::run(foreground).await,
         Commands::Stop => cmd::stop::run().await,

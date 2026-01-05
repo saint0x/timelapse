@@ -9,16 +9,29 @@
 //! All operations are designed to be configurable via CLI flags to give users
 //! maximum control over behavior.
 
+pub mod conflicts;
 pub mod export;
 pub mod git_ops;
 pub mod mapping;
 pub mod materialize;
+pub mod merge;
 pub mod publish;
 pub mod workspace;
 
 // Re-export public types
+pub use conflicts::{
+    has_conflict_markers, write_conflict_markers, count_conflicts,
+    parse_conflict_regions, is_resolved, check_resolution_status,
+    ConflictRegion, ResolutionStatus,
+    CONFLICT_MARKER_START, CONFLICT_MARKER_END,
+};
+pub use git_ops::{RemoteBranchInfo, BranchPushResult, BranchPushStatus, LocalBranchInfo};
 pub use mapping::JjMapping;
 pub use materialize::{CommitMessageOptions, PublishOptions};
+pub use merge::{
+    MergeResult, MergeState, ConflictInfo,
+    perform_merge, find_merge_base, get_branch_commit_id, get_current_commit_id,
+};
 pub use publish::{publish_checkpoint, publish_range};
 pub use workspace::{validate_workspace_name, JjWorkspace, WorkspaceManager, WorkspaceState};
 
