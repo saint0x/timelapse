@@ -5,7 +5,6 @@ use anyhow::{anyhow, Context, Result};
 use tl_core::{Store, TreeDiff};
 use owo_colors::OwoColorize;
 use std::path::Path;
-use ulid::Ulid;
 
 pub async fn run(checkpoint_a: &str, checkpoint_b: &str) -> Result<()> {
     // 1. Find repository root
@@ -14,41 +13,35 @@ pub async fn run(checkpoint_a: &str, checkpoint_b: &str) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Ensure daemon is running (auto-start with supervisor)
+    // 2. Ensure daemon running (auto-starts if needed)
     crate::daemon::ensure_daemon_running().await?;
 
-    // 3. Connect to daemon with retry
-    let socket_path = tl_dir.join("state/daemon.sock");
-    let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
-    let mut client = resilient_client.connect_with_retry().await
-        .context("Failed to connect to daemon")?;
+    // 3. Resolve checkpoint references via unified data access layer
+    let refs = vec![checkpoint_a.to_string(), checkpoint_b.to_string()];
+    let ids = crate::data_access::resolve_checkpoint_refs(&refs, &tl_dir).await?;
 
-    // 4. Parse checkpoint IDs
-    let id_a = Ulid::from_string(checkpoint_a)
-        .context("Invalid checkpoint ID format for first argument")?;
-    let id_b = Ulid::from_string(checkpoint_b)
-        .context("Invalid checkpoint ID format for second argument")?;
+    let id_a = ids[0].ok_or_else(||
+        anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint_a))?;
+    let id_b = ids[1].ok_or_else(||
+        anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint_b))?;
 
-    // 5. Batch fetch both checkpoints in ONE IPC call
-    let ids = vec![id_a.to_string(), id_b.to_string()];
-    let checkpoints = client.get_checkpoint_batch(ids).await?;
+    // 4. Get checkpoints via unified data access layer
+    let checkpoints = crate::data_access::get_checkpoints(&[id_a, id_b], &tl_dir).await?;
 
-    let cp_a = checkpoints[0].as_ref()
-        .ok_or_else(|| anyhow!("Checkpoint {} not found", id_a))?;
-    let cp_b = checkpoints[1].as_ref()
-        .ok_or_else(|| anyhow!("Checkpoint {} not found", id_b))?;
+    let cp_a = checkpoints[0].as_ref().ok_or_else(|| anyhow!("Checkpoint not found"))?;
+    let cp_b = checkpoints[1].as_ref().ok_or_else(|| anyhow!("Checkpoint not found"))?;
 
-    // 6. Open store for tree diffs (read-only, safe)
+    // 5. Open store for tree diffs (read-only, safe)
     let store = Store::open(&repo_root)?;
 
-    // 7. Load trees
+    // 6. Load trees
     let tree_a = store.read_tree(cp_a.root_tree)?;
     let tree_b = store.read_tree(cp_b.root_tree)?;
 
-    // 8. Compute diff
+    // 7. Compute diff
     let diff = TreeDiff::diff(&tree_a, &tree_b);
 
-    // 9. Display diff
+    // 8. Display diff
     println!("{}", "Diff Summary".bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();

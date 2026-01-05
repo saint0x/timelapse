@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use tl_core::store::Store;
-use journal::Journal;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,18 +25,31 @@ pub struct RepoInfo {
 pub async fn run() -> Result<()> {
     // Find repository root
     let repo_root = find_repo_root()?;
+    let tl_dir = repo_root.join(".tl");
 
-    // Open store
+    // Ensure daemon running (auto-starts if needed)
+    crate::daemon::ensure_daemon_running().await?;
+
+    // Get checkpoint info via unified data access layer
+    let (checkpoint_count, checkpoint_ids, _store_size_from_daemon) =
+        crate::data_access::get_info_data(&tl_dir).await?;
+
+    // Get latest checkpoint if available
+    let latest_checkpoint = if !checkpoint_ids.is_empty() {
+        // Parse the first ID (most recent)
+        let latest_id = ulid::Ulid::from_string(&checkpoint_ids[0])?;
+        let checkpoints = crate::data_access::get_checkpoints(&[latest_id], &tl_dir).await?;
+        checkpoints[0].clone()
+    } else {
+        None
+    };
+
+    // Open store for object stats
     let store = Store::open(&repo_root)
         .context("Failed to open Timelapse store. Is this a Timelapse repository?")?;
 
-    // Open journal
-    let journal_path = repo_root.join(".tl/journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
-
     // Gather statistics
-    let info = gather_info(&repo_root, &store, &journal)?;
+    let info = gather_info(&repo_root, &store, checkpoint_count, latest_checkpoint)?;
 
     // Display information
     display_info(&info);
@@ -61,7 +73,12 @@ fn find_repo_root() -> Result<PathBuf> {
     }
 }
 
-fn gather_info(repo_root: &Path, _store: &Store, journal: &Journal) -> Result<RepoInfo> {
+fn gather_info(
+    repo_root: &Path,
+    _store: &Store,
+    checkpoint_count: usize,
+    latest_checkpoint: Option<journal::Checkpoint>,
+) -> Result<RepoInfo> {
     let tl_dir = repo_root.join(".tl");
 
     // Count blobs
@@ -76,13 +93,8 @@ fn gather_info(repo_root: &Path, _store: &Store, journal: &Journal) -> Result<Re
     let journal_dir = tl_dir.join("journal");
     let journal_size = calculate_dir_size(&journal_dir)?;
 
-    // Count checkpoints
-    let checkpoint_ids = journal.all_checkpoint_ids()?;
-    let checkpoint_count = checkpoint_ids.len();
-
     // Latest checkpoint
-    let latest = journal.latest()?;
-    let (latest_checkpoint_id, latest_checkpoint_time) = match latest {
+    let (latest_checkpoint_id, latest_checkpoint_time) = match latest_checkpoint {
         Some(checkpoint) => {
             let id = checkpoint.id.to_string();
             let timestamp = checkpoint.ts_unix_ms;

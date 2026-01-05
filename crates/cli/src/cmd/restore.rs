@@ -3,7 +3,6 @@
 use crate::util;
 use anyhow::{anyhow, Context, Result};
 use tl_core::{Entry, Store};
-use journal::{Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::fs;
 use std::io::Write;
@@ -17,23 +16,20 @@ pub async fn run(checkpoint: &str) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Open journal, store, and pin manager
-    let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    // 2. Ensure daemon running (auto-starts if needed)
+    crate::daemon::ensure_daemon_running().await?;
 
+    // 3. Resolve checkpoint reference via unified data access layer
+    let ids = crate::data_access::resolve_checkpoint_refs(&[checkpoint.to_string()], &tl_dir).await?;
+    let checkpoint_id = ids[0].ok_or_else(||
+        anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint))?;
+
+    // 4. Get checkpoint via unified data access layer
+    let checkpoints = crate::data_access::get_checkpoints(&[checkpoint_id], &tl_dir).await?;
+    let cp = checkpoints[0].as_ref().ok_or_else(|| anyhow!("Checkpoint not found"))?;
+
+    // 5. Open store and load target tree
     let store = Store::open(&repo_root)?;
-
-    let pin_manager = PinManager::new(&tl_dir);
-
-    // 3. Resolve checkpoint reference
-    let checkpoint_id = util::resolve_checkpoint_ref(checkpoint, &journal, &pin_manager)?;
-
-    // 4. Get checkpoint
-    let cp = journal.get(&checkpoint_id)?
-        .ok_or_else(|| anyhow!("Checkpoint {} not found", checkpoint_id))?;
-
-    // 5. Load target tree
     let tree = store.read_tree(cp.root_tree)?;
 
     // 6. Confirm with user

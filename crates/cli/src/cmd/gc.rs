@@ -7,6 +7,7 @@ use tl_core::Store;
 use journal::{GarbageCollector, Journal, PinManager, RetentionPolicy};
 use owo_colors::OwoColorize;
 use ulid::Ulid;
+use std::time::Duration;
 
 pub async fn run() -> Result<()> {
     // 1. Find repository root
@@ -15,14 +16,32 @@ pub async fn run() -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Open journal and store
+    // 2. CRITICAL: Stop daemon before GC to avoid journal corruption
+    println!("{}", "Stopping daemon for exclusive journal access...".dimmed());
+
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let daemon_was_running = if socket_path.exists() {
+        match crate::ipc::IpcClient::connect(&socket_path).await {
+            Ok(mut client) => {
+                client.shutdown().await.ok(); // Send shutdown signal
+                // Wait for daemon to stop
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                true
+            }
+            Err(_) => false, // Daemon not running
+        }
+    } else {
+        false
+    };
+
+    // 3. Now safe to open journal with write access
     let journal_path = tl_dir.join("journal");
     let mut journal = Journal::open(&journal_path)
         .context("Failed to open checkpoint journal")?;
 
     let mut store = Store::open(&repo_root)?;
 
-    // 3. Create pin manager
+    // 4. Create pin manager
     let pin_manager = PinManager::new(&tl_dir);
 
     // 4. Collect workspace checkpoints (if JJ workspace exists)
@@ -67,6 +86,17 @@ pub async fn run() -> Result<()> {
             "Space freed:         {}",
             util::format_size(metrics.bytes_freed).green()
         );
+    }
+
+    // 8. Drop journal and store to release locks before restarting daemon
+    drop(journal);
+    drop(store);
+
+    // 9. Restart daemon if it was running before
+    if daemon_was_running {
+        println!();
+        println!("{}", "Restarting daemon...".dimmed());
+        crate::daemon::ensure_daemon_running().await?;
     }
 
     Ok(())

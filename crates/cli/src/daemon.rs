@@ -197,6 +197,7 @@ impl Daemon {
                     match result {
                         Ok(stream) => {
                             let journal = Arc::clone(&self.journal);
+                            let store = Arc::clone(&self.store);
                             let status = Arc::clone(&self.status);
                             let shutdown_tx = self.shutdown_tx.clone();
                             let flush_tx = self.flush_tx.clone();
@@ -346,6 +347,92 @@ impl Daemon {
                                     }
 
                                     Ok(IpcResponse::LogData { count, checkpoints })
+                                }
+                                IpcRequest::ResolveCheckpointRefs(refs) => {
+                                    // Resolve each reference (full ULID, short prefix, or pin name)
+                                    let tl_dir = store.tl_dir();
+                                    let pin_manager = journal::PinManager::new(&tl_dir);
+                                    let mut results = Vec::new();
+
+                                    for checkpoint_ref in refs {
+                                        // Try full ULID first
+                                        if let Ok(ulid) = Ulid::from_string(&checkpoint_ref) {
+                                            match journal.get(&ulid) {
+                                                Ok(Some(cp)) => {
+                                                    results.push(Some(cp));
+                                                    continue;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+
+                                        // Try short prefix (4+ chars)
+                                        if checkpoint_ref.len() >= 4 {
+                                            let all_ids = match journal.all_checkpoint_ids() {
+                                                Ok(ids) => ids,
+                                                Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                            };
+
+                                            let matching: Vec<_> = all_ids
+                                                .iter()
+                                                .filter(|id| id.to_string().starts_with(&checkpoint_ref))
+                                                .collect();
+
+                                            if matching.len() == 1 {
+                                                match journal.get(matching[0]) {
+                                                    Ok(Some(cp)) => {
+                                                        results.push(Some(cp));
+                                                        continue;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else if matching.len() > 1 {
+                                                results.push(None); // Ambiguous
+                                                continue;
+                                            }
+                                        }
+
+                                        // Try pin name
+                                        match pin_manager.list_pins() {
+                                            Ok(pins) => {
+                                                if let Some((_, ulid)) = pins.iter().find(|(name, _)| name == &checkpoint_ref) {
+                                                    match journal.get(ulid) {
+                                                        Ok(Some(cp)) => {
+                                                            results.push(Some(cp));
+                                                            continue;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+
+                                        // Not found
+                                        results.push(None);
+                                    }
+
+                                    Ok(IpcResponse::ResolvedCheckpoints(results))
+                                }
+                                IpcRequest::GetInfoData => {
+                                    // Get checkpoint count from cache
+                                    let total_checkpoints = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                    // Get all checkpoint IDs
+                                    let checkpoint_ids = match journal.all_checkpoint_ids() {
+                                        Ok(ids) => ids.iter().map(|id| id.to_string()).collect(),
+                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                    };
+
+                                    // Calculate store size
+                                    let store_path = store.tl_dir().join("store");
+                                    let store_size_bytes = calculate_dir_size(&store_path).unwrap_or(0);
+
+                                    Ok(IpcResponse::InfoData {
+                                        total_checkpoints,
+                                        checkpoint_ids,
+                                        store_size_bytes,
+                                    })
                                 }
                                 IpcRequest::Shutdown => {
                                     // Signal shutdown
@@ -717,6 +804,26 @@ fn save_pathmap(path: &Path, pathmap: &PathMap) -> Result<()> {
         .context("Failed to save pathmap")?;
 
     Ok(())
+}
+
+/// Calculate total size of a directory recursively
+fn calculate_dir_size(path: &Path) -> Result<u64> {
+    let mut total_size = 0u64;
+
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_file() {
+            total_size += metadata.len();
+        } else if metadata.is_dir() {
+            total_size += calculate_dir_size(&entry.path())?;
+        }
+    }
+    Ok(total_size)
 }
 
 /// Get current timestamp in milliseconds

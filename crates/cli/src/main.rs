@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod cmd;
 mod daemon;
+mod data_access;
 mod ipc;
 mod locks;
 mod util;

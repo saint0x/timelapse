@@ -2,7 +2,7 @@
 
 use crate::util;
 use anyhow::{anyhow, Context, Result};
-use journal::{Journal, PinManager};
+use journal::PinManager;
 use owo_colors::OwoColorize;
 
 pub async fn run(checkpoint: &str, name: &str) -> Result<()> {
@@ -12,21 +12,20 @@ pub async fn run(checkpoint: &str, name: &str) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Open journal and pin manager
-    let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    // 2. Ensure daemon running (auto-starts if needed)
+    crate::daemon::ensure_daemon_running().await?;
 
-    let pin_manager = PinManager::new(&tl_dir);
-
-    // 3. Resolve checkpoint reference
-    let checkpoint_id = util::resolve_checkpoint_ref(checkpoint, &journal, &pin_manager)?;
+    // 3. Resolve checkpoint reference via unified data access layer
+    let ids = crate::data_access::resolve_checkpoint_refs(&[checkpoint.to_string()], &tl_dir).await?;
+    let checkpoint_id = ids[0].ok_or_else(||
+        anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint))?;
 
     // 4. Verify checkpoint exists
-    journal.get(&checkpoint_id)?
-        .ok_or_else(|| anyhow!("Checkpoint {} not found", checkpoint_id))?;
+    let checkpoints = crate::data_access::get_checkpoints(&[checkpoint_id], &tl_dir).await?;
+    checkpoints[0].as_ref().ok_or_else(|| anyhow!("Checkpoint not found"))?;
 
-    // 5. Pin the checkpoint
+    // 5. Pin the checkpoint (PinManager is safe to use directly - writes to separate files)
+    let pin_manager = PinManager::new(&tl_dir);
     pin_manager.pin(name, checkpoint_id)?;
 
     let id_short = checkpoint_id.to_string()[..8].to_string();

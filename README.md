@@ -100,10 +100,18 @@ tl gc                      # Run garbage collection
 
 ### Checkpoint Reference Formats
 - Full ULID: `01HN8XYZ...`
-- Short prefix: `01HN8` (must be unique)
+- Short prefix: `01HN8` (4+ characters, must be unique)
 - Pin name: `my-pin`
 - Workspace pin: `ws:feature-name` (auto-created)
 - HEAD: Latest checkpoint
+
+**Short ID Examples:**
+```bash
+tl log --limit 5        # Shows IDs like: 01KE5RWZ, 01KE5RWS, 01KE5RW2
+tl diff 01KE5RWS 01KE5RWZ   # Use 8-char IDs directly
+tl pin 01KE5RWZ milestone   # Pin with short ID
+tl restore 01KE5RW2         # Restore using short ID
+```
 
 ---
 
@@ -124,40 +132,77 @@ tl gc                      # Run garbage collection
 │                     Timelapse Architecture                   │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Working Directory                                           │
-│         │                                                    │
-│         ├──> File System Watcher (notify)                   │
-│         │         │                                          │
-│         │         ├─> Debouncer (300ms, per-path)          │
-│         │         └─> Event Coalescer                       │
-│         │                   │                                │
-│         │                   ▼                                │
-│         │         Incremental Updater                       │
-│         │                   │                                │
-│         │                   ├─> BLAKE3 Hasher              │
-│         │                   ├─> PathMap Cache              │
-│         │                   └─> Tree Builder               │
-│         │                         │                          │
-│         │                         ▼                          │
-│         │         Content Store (.tl/objects/)             │
-│         │                   │                                │
-│         │                   ├─> Blob Store (zstd)          │
-│         │                   └─> Tree Store                  │
-│         │                         │                          │
-│         │                         ▼                          │
-│         │         Checkpoint Journal (Sled DB)              │
-│         │                   │                                │
-│         │                   └─> ULID-indexed entries        │
-│         │                                                    │
-│         │                                                    │
-│         └──> JJ Integration Layer                           │
-│                     │                                        │
-│                     ├─> Checkpoint → JJ Commit              │
-│                     ├─> JJ → Git Bridge                     │
-│                     └─> Remote Sync (git push/pull)         │
+│  CLI Commands                 Background Daemon              │
+│         │                           │                        │
+│         ├──> Unified Data Access    │                       │
+│         │    Layer (IPC-first)      │                       │
+│         │         │                 │                       │
+│         │         ├─> Try IPC ──────┤                       │
+│         │         │   (no locks)    ▼                       │
+│         │         │            IPC Server                   │
+│         │         │            (Unix socket)                │
+│         │         │                 │                       │
+│         │         └─> Fallback ─────┤                       │
+│         │             (direct,      │                       │
+│         │              when stopped)│                       │
+│         │                           │                       │
+│         └──> Working Directory      │                       │
+│                     │               │                       │
+│                     │               ▼                       │
+│                     │      File System Watcher             │
+│                     │               │                       │
+│                     │               ├─> Debouncer          │
+│                     │               └─> Coalescer          │
+│                     │                     │                 │
+│                     │                     ▼                 │
+│                     │         Incremental Updater          │
+│                     │                     │                 │
+│                     │                     ├─> BLAKE3        │
+│                     │                     ├─> PathMap       │
+│                     │                     └─> Tree Builder  │
+│                     │                           │           │
+│                     │                           ▼           │
+│                     │         Content Store (.tl/objects/)  │
+│                     │                     │                 │
+│                     │                     ├─> Blobs (zstd)  │
+│                     │                     └─> Trees         │
+│                     │                           │           │
+│                     │                           ▼           │
+│                     │         Checkpoint Journal (Sled)     │
+│                     │                     │                 │
+│                     │                     └─> ULID index    │
+│                     │                                       │
+│                     └──> JJ Integration Layer               │
+│                                   │                         │
+│                                   ├─> Publish (CP → JJ)    │
+│                                   ├─> Push/Pull (Git sync) │
+│                                   └─> Mapping DB           │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Unified Data Access Architecture
+
+**Production-Ready IPC-First Design:**
+
+All CLI commands use a unified data access layer that:
+1. **Tries IPC first** - Fast, lock-free communication with daemon
+2. **Falls back automatically** - Direct journal access when daemon stopped
+3. **Supports short IDs** - 4+ character checkpoint prefixes (e.g., `01KE5RWS`)
+4. **Resolves pin names** - Named checkpoints for easy reference
+
+**Key Benefits:**
+- ✅ **Zero lock conflicts** - All commands work with daemon running
+- ✅ **Short checkpoint IDs** - Copy 8 chars from log, use anywhere
+- ✅ **Pin name resolution** - `tl restore working-version`
+- ✅ **GC safety** - Daemon stopped during garbage collection
+- ✅ **Automatic fallback** - Works when daemon is not running
+
+**Implementation:**
+- Single `data_access.rs` module for all commands
+- Consistent error handling and retry logic
+- Race condition free (GC properly stops/restarts daemon)
+- Production tested with comprehensive integration tests
 
 ### Storage Model
 
@@ -364,7 +409,11 @@ Timelapse is implemented as a Rust workspace with five crates:
 - ✅ IPC via Unix domain sockets (bincode protocol)
 - ✅ All 13 commands implemented (status, log, diff, restore, pin, unpin, gc, etc.)
 - ✅ Background daemon with event loop and signal handling
-- ✅ Comprehensive test coverage (14 integration tests)
+- ✅ **Unified data access architecture** (IPC-first with automatic fallback)
+- ✅ **Short checkpoint ID support** (4+ chars: `01KE5RWS`)
+- ✅ **Zero lock conflicts** (all commands work with daemon running)
+- ✅ **GC race condition fixed** (safe daemon stop/restart)
+- ✅ Comprehensive test coverage (14 integration tests + 12 E2E tests)
 
 **Phase 5: JJ Integration** ✅ Complete (JJ CLI-based approach)
 - ✅ Enhanced init command with automatic git/JJ initialization

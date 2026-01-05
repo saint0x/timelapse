@@ -40,6 +40,10 @@ pub enum IpcRequest {
         limit: Option<usize>,
         offset: Option<usize>,
     },
+    /// Resolve checkpoint references and return checkpoints (supports short IDs, full IDs, pin names)
+    ResolveCheckpointRefs(Vec<String>),
+    /// Get repository info (checkpoint IDs, storage stats)
+    GetInfoData,
 }
 
 /// IPC response from daemon to CLI
@@ -71,6 +75,14 @@ pub enum IpcResponse {
     LogData {
         count: usize,
         checkpoints: Vec<Checkpoint>,
+    },
+    /// Resolved checkpoints from references (same order as request, None if not found/ambiguous)
+    ResolvedCheckpoints(Vec<Option<Checkpoint>>),
+    /// Repository info data
+    InfoData {
+        total_checkpoints: usize,
+        checkpoint_ids: Vec<String>,
+        store_size_bytes: u64,
     },
     /// Error occurred
     Error(String),
@@ -246,6 +258,28 @@ impl IpcClient {
             IpcResponse::LogData { count, checkpoints } => Ok((count, checkpoints)),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetLogData"),
+        }
+    }
+
+    /// Resolve checkpoint references (supports full IDs, short prefixes, pin names)
+    pub async fn resolve_checkpoint_refs(&mut self, refs: Vec<String>) -> Result<Vec<Option<Checkpoint>>> {
+        let request = IpcRequest::ResolveCheckpointRefs(refs);
+        match self.send_request(&request).await? {
+            IpcResponse::ResolvedCheckpoints(checkpoints) => Ok(checkpoints),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to ResolveCheckpointRefs"),
+        }
+    }
+
+    /// Get repository info data (for info command)
+    pub async fn get_info_data(&mut self) -> Result<(usize, Vec<String>, u64)> {
+        let request = IpcRequest::GetInfoData;
+        match self.send_request(&request).await? {
+            IpcResponse::InfoData { total_checkpoints, checkpoint_ids, store_size_bytes } => {
+                Ok((total_checkpoints, checkpoint_ids, store_size_bytes))
+            }
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetInfoData"),
         }
     }
 }
