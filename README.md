@@ -1,33 +1,32 @@
 # timelapse
 
-**The missing Git primitive for autonomous agents: continuous checkpoint streams that capture every working state losslessly.**
+**Automatic checkpoint streams for agent-native development workflows. Built on Jujutsu (JJ) for Git compatibility.**
 
-## Abstract
+Timelapse provides lossless, sub-10ms checkpoint capture for autonomous agents and AI-assisted coding tools. Every file save creates a content-addressed snapshot with instant restoration to any previous state. Powered by [Jujutsu](https://github.com/martinvonz/jj) for production-grade Git interoperability.
 
-Timelapse is a low-latency, lossless checkpoint system for code repositories that extends Git's content-addressed storage model to capture working directory state on every file save. Unlike Git's manual commit model, timelapse provides an automatic, continuous checkpoint stream optimized for high-frequency iteration workflows characteristic of AI-assisted development and autonomous agent operation.
+## Technical Overview
 
-The system achieves sub-10 millisecond checkpoint creation through incremental tree hashing and content-addressed blob storage, enabling instant restoration to any previous working state. Integration with Jujutsu (JJ) provides bidirectional interoperability with Git for remote synchronization and publication workflows.
+**Architecture:** Content-addressed storage + incremental tree hashing + event-driven file monitoring
+**Foundation:** Git object format (SHA-1) with Jujutsu integration layer
+**Performance:** < 10ms checkpoint creation, < 100ms restoration, O(changed files) complexity
+**Storage:** Automatic deduplication via content addressing, zlib compression
 
----
+**Agent-Native Design:**
+- **Zero-overhead capture**: Background daemon creates checkpoints automatically every 5 seconds
+- **High-frequency iteration**: Optimized for 10-100+ code variations per task
+- **Instant rollback**: Restore to any previous state in < 100ms
+- **Git compatibility**: Publish checkpoint streams to Git via Jujutsu integration
+- **Non-linear exploration**: Preserve all intermediate states and dead-ends
 
-## Motivation
+**Built on Jujutsu (JJ):**
 
-Modern development workflows increasingly involve autonomous agents and AI-assisted coding tools that iterate rapidly—exploring tens to hundreds of code variations per feature implementation. Traditional version control systems optimize for human-paced development with explicit, coarse-grained commits. This creates a fundamental mismatch:
+Timelapse leverages [Jujutsu](https://github.com/martinvonz/jj) as the bridge to Git:
+- Production-grade Git interoperability without implementing Git protocol
+- Atomic operations and conflict-free merging inherited from JJ
+- Bidirectional checkpoint ↔ commit materialization
+- Standard `git push/pull` workflows via `jj git` commands
 
-**Characteristics of agent-driven development:**
-- High iteration frequency (10-100 variations per task)
-- Exploratory, non-linear development paths
-- Value in preserving intermediate states and dead-ends
-- Need for rapid rollback and state restoration
-- Requirement for zero-overhead history capture
-
-**Limitations of manual commit models:**
-- Cognitive overhead of deciding when to commit
-- Loss of uncommitted working states during exploration
-- Difficulty maintaining granular history discipline
-- No automatic capture of micro-iterations
-
-Timelapse addresses this gap by providing infrastructure-level checkpoint capture that operates transparently, preserving complete working state history without manual intervention.
+**Why JJ?** Mature, well-tested foundation for programmatic version control with superior semantics for autonomous agents.
 
 ---
 
@@ -119,11 +118,11 @@ tl restore 01KE5RW2         # Restore using short ID
 
 ### Design Principles
 
-1. **Content-addressed storage**: Blobs and trees identified by cryptographic hash (BLAKE3)
-2. **Incremental update computation**: Only changed files rehashed per checkpoint
-3. **Append-only journal**: Checkpoint metadata in embedded database (Sled)
-4. **File system event-driven**: Platform-native watchers (FSEvents, inotify)
-5. **Git-compatible primitives**: Storage format compatible with Git object model
+1. **Git-native content addressing**: SHA-1 hashing with Git blob/tree object format
+2. **Jujutsu foundation**: Built on JJ (Google's next-gen VCS) for production-grade Git interop
+3. **Incremental update computation**: Only changed files rehashed per checkpoint (O(k) complexity)
+4. **Append-only journal**: Checkpoint metadata in embedded database (Sled)
+5. **File system event-driven**: Platform-native watchers (FSEvents, inotify)
 
 ### Component Overview
 
@@ -157,7 +156,7 @@ tl restore 01KE5RW2         # Restore using short ID
 │                     │                     ▼                 │
 │                     │         Incremental Updater          │
 │                     │                     │                 │
-│                     │                     ├─> BLAKE3        │
+│                     │                     ├─> SHA-1 (Git)   │
 │                     │                     ├─> PathMap       │
 │                     │                     └─> Tree Builder  │
 │                     │                           │           │
@@ -209,14 +208,16 @@ All CLI commands use a unified data access layer that:
 Timelapse extends Git's proven object model:
 
 **Blobs** (Content-addressed file data):
-- BLAKE3 hash (32 bytes, SIMD-accelerated)
-- Zstd compression for files > 4KB
+- SHA-1 hash (20 bytes, Git-compatible)
+- Git blob format: `blob <size>\0<content>`
+- zlib compression (Git standard)
 - Stored at `.tl/objects/blobs/<prefix>/<hash>`
 - Automatic deduplication via content addressing
 
 **Trees** (Directory snapshots):
-- Ordered map: `PathBuf → Entry { type, mode, hash }`
-- Deterministic serialization (bincode, sorted entries)
+- Git tree format with sorted entries
+- Entry format: `<mode> <name>\0<hash>` (octal modes: 100644, 100755, 120000)
+- SHA-1 hash of serialized tree
 - Stored at `.tl/objects/trees/<prefix>/<hash>`
 - Enables efficient tree diffing
 
@@ -238,11 +239,11 @@ Timelapse checkpoints have **two forms of identity** for different use cases:
 - **Uniqueness**: Guaranteed globally unique
 
 **2. Tree Hash (State Identity)**
-- **Format**: BLAKE3 content-addressed hash (32 bytes = 64 hex chars)
+- **Format**: SHA-1 content-addressed hash (20 bytes = 40 hex chars, Git-compatible)
 - **Used for**: State equivalence, deduplication, "restore to exact state"
-- **Example**: `blake3:a3f8d9e2c4b1...`
-- **Property**: Same working tree → same hash
-- **Benefit**: Automatic deduplication
+- **Example**: `sha1:a3f8d9e2c4b1...`
+- **Property**: Same working tree → same hash (Git object format)
+- **Benefit**: Automatic deduplication + Git interoperability
 
 **Why Both?**
 - ULID provides **chronological ordering** (when did this happen?)
@@ -258,7 +259,7 @@ tl restore @{5m-ago}
 tl restore HEAD~3
 
 # Restore by state (tree hash)
-tl restore blake3:a3f8d9e2...
+tl restore sha1:a3f8d9e2...
 
 # Find all checkpoints with identical state
 tl log --tree-hash a3f8d9e2
@@ -270,7 +271,7 @@ tl log --tree-hash a3f8d9e2
 **Deduplication in Action:**
 ```
 Checkpoint A (ULID: 01HN8...)  ──┐
-                                  ├──> Tree: blake3:abc123 (stored once)
+                                  ├──> Tree: sha1:abc123 (stored once)
 Checkpoint B (ULID: 01HN9...)  ──┘
 
 Two checkpoints, one tree → efficient storage
@@ -282,7 +283,7 @@ Performance-critical path for sub-10ms checkpoint creation:
 
 1. **Event capture**: File watcher reports modified paths
 2. **Debouncing**: Per-path 300ms window to avoid mid-write reads
-3. **Hash computation**: BLAKE3 over changed files only
+3. **Hash computation**: SHA-1 over changed files only (Git-compatible)
 4. **Cache lookup**: Compare with PathMap (previous tree state)
 5. **Conditional storage**: Store blob only if hash differs
 6. **Tree update**: Modify PathMap entries for changed paths
@@ -291,28 +292,41 @@ Performance-critical path for sub-10ms checkpoint creation:
 
 **Time complexity**: O(k) where k = number of changed files (not O(n) for repository size)
 
-### Integration with Jujutsu
+### Jujutsu Integration Layer
 
-Timelapse uses Jujutsu (JJ) as the bridge layer to Git:
+**Foundation:** Timelapse is built on [Jujutsu](https://github.com/martinvonz/jj), a next-generation VCS by Google designed for scalable version control.
 
-**Architecture**:
+**Why Jujutsu?**
+- **Production-grade**: Developed by Google for managing massive monorepos
+- **Git-compatible**: Native bidirectional sync with Git repositories
+- **Atomic operations**: MVCC (Multi-Version Concurrency Control) prevents corruption
+- **Conflict-free**: Automatic conflict resolution inherited from operational transform theory
+- **Programmatic API**: Superior semantics for autonomous agent workflows
+
+**Architecture:**
 ```
-Timelapse          JJ              Git
----------          --              ---
-Checkpoints   →   Commits    →    Commits
-(100s/day)        (10s/day)       (1-5/day)
-                      ↓
-                  jj-lib API
-                      ↓
-              jj git push/pull
+Timelapse Checkpoints (100s/day)
+         ↓
+    Publish Layer
+         ↓
+   JJ Commits (10s/day) ←→ jj-lib API
+         ↓
+   jj git push/pull
+         ↓
+   Git Commits (1-5/day) → GitHub/GitLab/etc.
 ```
 
-**Key operations**:
-- `tl publish <checkpoint>`: Materializes checkpoint as JJ commit
-- `tl push`: Invokes `jj git push` to sync with Git remote
-- `tl pull`: Imports JJ commits as checkpoints
+**Integration Points:**
+1. **Checkpoint Materialization**: `tl publish` creates JJ commits from checkpoint streams
+2. **Git Synchronization**: `tl push/pull` leverages JJ's Git bridge for remote operations
+3. **Bidirectional Mapping**: Sled-backed database tracks checkpoint ↔ JJ commit relationships
+4. **Atomic Publishing**: Inherited from JJ's transaction model
 
-**Rationale**: JJ provides superior semantics for programmatic commit creation and Git interoperability without implementing Git protocol from scratch.
+**Technical Benefits:**
+- No custom Git protocol implementation (leverages JJ's proven Git compatibility layer)
+- Conflict-free merging for concurrent agent operations
+- Atomic commit creation with rollback guarantees
+- Mature, battle-tested foundation used in production at Google
 
 ---
 
@@ -381,9 +395,9 @@ Timelapse is implemented as a Rust workspace with five crates:
 ### Phase Breakdown
 
 **Phase 1: Core Storage** ✅ Complete
-- BLAKE3 hashing (streaming + memory-mapped)
-- Blob storage with compression
-- Tree serialization and diffing
+- SHA-1 hashing (Git-compatible, streaming + memory-mapped)
+- Git blob format with zlib compression
+- Git tree format with deterministic serialization
 - `.tl/` repository initialization
 - Atomic write operations (fsync guarantees)
 
@@ -631,7 +645,7 @@ def agent_explore(approaches: list[str]) -> str:
 └──────────────────────────────────────┘
 ```
 
-**Tree encoding** (bincode serialization):
+**Tree encoding** (Git tree format):
 ```rust
 #[derive(Serialize, Deserialize)]
 struct Tree {
@@ -641,8 +655,8 @@ struct Tree {
 #[derive(Serialize, Deserialize)]
 struct Entry {
     entry_type: EntryType,  // File | Directory | Symlink
-    mode: u32,              // Unix permissions
-    hash: Blake3Hash,       // 32-byte BLAKE3
+    mode: u32,              // Unix permissions (octal: 100644, 100755, 120000)
+    hash: Sha1Hash,         // 20-byte SHA-1 (Git-compatible)
 }
 ```
 
@@ -651,7 +665,7 @@ struct Entry {
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
     id: Ulid,                    // 128-bit timestamp-sortable
-    tree_hash: Blake3Hash,       // Root tree
+    tree_hash: Sha1Hash,         // Root tree (Git-compatible)
     parent: Option<Ulid>,        // Parent checkpoint (DAG)
     timestamp: SystemTime,
     trigger: TriggerType,        // FsBatch | Manual | Scheduled
@@ -731,10 +745,10 @@ struct Checkpoint {
 ### Dependencies
 
 **Core libraries**:
-- `blake3` (1.5) — Cryptographic hashing
+- `sha1` — SHA-1 hashing (Git-compatible)
 - `sled` (0.34) — Embedded database
 - `notify` (6.1) — Cross-platform file watching
-- `zstd` (0.13) — Compression
+- `flate2` — zlib compression (Git standard)
 - `jj-lib` (0.23) — Jujutsu integration
 - `ulid` (1.1) — Sortable identifiers
 - `tokio` (1.40) — Async runtime
@@ -785,9 +799,9 @@ timelapse/
 ├── crates/
 │   ├── core/          # Content-addressed storage primitives
 │   │   ├── src/
-│   │   │   ├── hash.rs       # BLAKE3 hashing (streaming, mmap)
-│   │   │   ├── blob.rs       # Blob storage with compression
-│   │   │   ├── tree.rs       # Tree serialization and diffing
+│   │   │   ├── hash.rs       # SHA-1 hashing (Git-compatible)
+│   │   │   ├── blob.rs       # Git blob format with zlib compression
+│   │   │   ├── tree.rs       # Git tree format and diffing
 │   │   │   └── store.rs      # .tl/ directory management
 │   │   ├── benches/          # Criterion benchmarks
 │   │   └── tests/            # 72 unit tests
