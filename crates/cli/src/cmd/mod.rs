@@ -19,6 +19,7 @@ pub mod resolve;
 pub mod start;
 pub mod stop;
 pub mod flush;
+pub mod config;
 pub mod worktree_list;
 pub mod worktree_add;
 pub mod worktree_switch;

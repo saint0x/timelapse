@@ -254,6 +254,50 @@ impl BlobStore {
         Ok(data)
     }
 
+    /// Get the size of a blob without reading its full contents
+    ///
+    /// This reads only the blob header to extract the size, which is more
+    /// efficient than reading the entire blob when you only need the size.
+    pub fn blob_size(&self, hash: Sha1Hash) -> Result<u64> {
+        use std::fs;
+
+        // Check cache first
+        if let Some(cached_blob) = self.cache.get(&hash) {
+            return Ok(cached_blob.size);
+        }
+
+        // Read from disk
+        let blob_path = self.blob_path(hash);
+        if !blob_path.exists() {
+            anyhow::bail!("Blob not found: {}", hash.to_hex());
+        }
+
+        let compressed = fs::read(&blob_path)?;
+
+        // Decompress just enough to read the header
+        let mut decoder = ZlibDecoder::new(&compressed[..]);
+        let mut header_buf = vec![0u8; 128]; // Should be enough for "blob <size>\0"
+        let bytes_read = decoder.read(&mut header_buf)?;
+        header_buf.truncate(bytes_read);
+
+        // Parse Git blob format: "blob <size>\0<content>"
+        if !header_buf.starts_with(b"blob ") {
+            anyhow::bail!("Invalid Git blob format: missing 'blob ' header");
+        }
+
+        // Find the null byte separator
+        let null_pos = header_buf
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Git blob format: missing null separator"))?;
+
+        // Parse size from header
+        let size_str = std::str::from_utf8(&header_buf[5..null_pos])?;
+        let size: u64 = size_str.parse()?;
+
+        Ok(size)
+    }
+
     /// Check if a blob exists
     pub fn has_blob(&self, hash: Sha1Hash) -> bool {
         // Check cache first

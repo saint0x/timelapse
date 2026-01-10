@@ -31,6 +31,7 @@ hex = { workspace = true }
 pollster = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 # Parallelization
 rayon = "1.10"

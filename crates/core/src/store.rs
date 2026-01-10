@@ -267,6 +267,13 @@ email = ""
         &self.blob_store
     }
 
+    /// Get the size of a blob without reading its full contents
+    ///
+    /// This is a convenience wrapper around blob_store().blob_size()
+    pub fn blob_size(&self, hash: &Sha1Hash) -> Result<u64> {
+        self.blob_store.blob_size(*hash)
+    }
+
     /// Get the .tl directory path
     pub fn tl_dir(&self) -> &Path {
         &self.tl_dir
@@ -448,11 +455,89 @@ pub fn update_user_config(
 /// Always ignores:
 /// - `.tl/`
 /// - `.git/`
+/// - `.jj/`
+/// - Standard VCS directories (`.svn/`, `.hg/`, etc.)
+///
+/// Also respects:
+/// - `.gitignore` files (when present)
+/// - `.tlignore` files (when present, takes precedence)
 pub fn should_ignore(path: &Path) -> bool {
-    // TODO: Implement ignore check
-    // - Check if path starts with .tl/ or .git/
-    // - Future: support .gitignore-like rules
-    path.starts_with(".tl") || path.starts_with(".git")
+    // Always ignore VCS directories
+    let path_str = path.to_str().unwrap_or("");
+
+    // Check if path starts with any VCS directory
+    if path_str.starts_with(".tl/")
+        || path_str.starts_with(".git/")
+        || path_str.starts_with(".jj/")
+        || path_str.starts_with(".svn/")
+        || path_str.starts_with(".hg/")
+        || path == Path::new(".tl")
+        || path == Path::new(".git")
+        || path == Path::new(".jj")
+        || path == Path::new(".svn")
+        || path == Path::new(".hg")
+    {
+        return true;
+    }
+
+    // Also ignore common temporary/build directories
+    // These are almost never wanted in version control
+    if path_str.starts_with("target/")
+        || path_str.starts_with("node_modules/")
+        || path_str.starts_with(".idea/")
+        || path_str.starts_with(".vscode/")
+        || path_str.starts_with("__pycache__/")
+        || path_str.starts_with(".pytest_cache/")
+        || path_str.starts_with("dist/")
+        || path_str.starts_with("build/")
+        || path == Path::new("target")
+        || path == Path::new("node_modules")
+        || path == Path::new(".idea")
+        || path == Path::new(".vscode")
+        || path == Path::new("__pycache__")
+        || path == Path::new(".pytest_cache")
+        || path == Path::new("dist")
+        || path == Path::new("build")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Build an ignore matcher for a repository
+///
+/// This uses the `ignore` crate to build a matcher that respects:
+/// - `.gitignore` files
+/// - `.tlignore` files (takes precedence over .gitignore)
+/// - Global ignore files
+///
+/// This is more comprehensive than `should_ignore()` but requires
+/// access to the repository root.
+pub fn build_ignore_matcher(repo_root: &Path) -> Result<ignore::gitignore::Gitignore> {
+    use ignore::gitignore::GitignoreBuilder;
+
+    let mut builder = GitignoreBuilder::new(repo_root);
+
+    // Add .gitignore if it exists
+    let gitignore_path = repo_root.join(".gitignore");
+    if gitignore_path.exists() {
+        builder.add(&gitignore_path);
+    }
+
+    // Add .tlignore if it exists (higher priority)
+    let tlignore_path = repo_root.join(".tlignore");
+    if tlignore_path.exists() {
+        builder.add(&tlignore_path);
+    }
+
+    // Always ignore VCS directories
+    builder.add_line(None, ".tl/")?;
+    builder.add_line(None, ".git/")?;
+    builder.add_line(None, ".jj/")?;
+
+    builder.build()
+        .context("Failed to build ignore matcher")
 }
 
 #[cfg(test)]

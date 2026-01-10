@@ -187,6 +187,27 @@ enum Commands {
     /// Manage JJ workspaces with timelapse integration
     #[command(subcommand)]
     Worktree(WorktreeCommands),
+    /// View and manage configuration
+    Config {
+        /// List all configuration values
+        #[arg(short, long)]
+        list: bool,
+        /// Get a configuration value
+        #[arg(short, long)]
+        get: Option<String>,
+        /// Set a configuration value (format: key=value)
+        #[arg(short, long)]
+        set: Option<String>,
+        /// Show config file path
+        #[arg(short, long)]
+        path: bool,
+        /// Create config file if it doesn't exist (with --path)
+        #[arg(long)]
+        create: bool,
+        /// Show example configuration
+        #[arg(short, long)]
+        example: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,6 +313,26 @@ async fn main() -> Result<()> {
             }
             WorktreeCommands::Switch { name } => {
                 cmd::worktree_switch::run(&name).await
+            }
+        },
+        Commands::Config { list, get, set, path, create, example } => {
+            if example {
+                cmd::config::run_example().await
+            } else if path {
+                cmd::config::run_path(create).await
+            } else if let Some(key) = get {
+                cmd::config::run_get(&key).await
+            } else if let Some(kv) = set {
+                let parts: Vec<&str> = kv.splitn(2, '=').collect();
+                if parts.len() != 2 {
+                    anyhow::bail!("Invalid format. Use: --set key=value");
+                }
+                cmd::config::run_set(parts[0], parts[1]).await
+            } else if list {
+                cmd::config::run_list().await
+            } else {
+                // Default to list
+                cmd::config::run_list().await
             }
         },
     }

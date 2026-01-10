@@ -11,8 +11,10 @@ use crate::system_config::{self, SystemConfig};
 use crate::util;
 use anyhow::{Context, Result};
 use tl_core::store::Store;
+use tl_core::EntryKind;
 use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, GarbageCollector, Journal, PathMap, PinManager};
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -654,6 +656,9 @@ impl Daemon {
         // Convert Arc<Path> to &Path
         let paths: Vec<&Path> = dirty_paths.iter().map(|p| p.as_ref()).collect();
 
+        // Calculate bytes statistics before update
+        let (bytes_added, bytes_removed) = self.calculate_bytes_statistics(&paths)?;
+
         // Use incremental update algorithm
         let (new_map, _tree, tree_hash) = incremental_update(
             &self.pathmap,
@@ -668,8 +673,8 @@ impl Daemon {
         // Create checkpoint metadata
         let meta = CheckpointMeta {
             files_changed: dirty_paths.len() as u32,
-            bytes_added: 0,    // TODO: Track from incremental_update
-            bytes_removed: 0,  // TODO: Track from incremental_update
+            bytes_added,
+            bytes_removed,
         };
 
         // Create checkpoint
@@ -697,6 +702,52 @@ impl Daemon {
         self.watcher.mark_checkpoint(SystemTime::now());
 
         Ok(checkpoint.id)
+    }
+
+    /// Calculate bytes added and removed for changed paths
+    ///
+    /// This compares the current file sizes with the previous checkpoint state.
+    /// - bytes_added: sum of sizes of new/modified files (current size)
+    /// - bytes_removed: sum of sizes of deleted/modified files (previous size)
+    fn calculate_bytes_statistics(&self, dirty_paths: &[&Path]) -> Result<(u64, u64)> {
+        let mut bytes_added = 0u64;
+        let mut bytes_removed = 0u64;
+
+        let repo_root = self.store.root();
+
+        for path in dirty_paths {
+            let full_path = repo_root.join(path);
+
+            // Get current file size (0 if deleted/missing)
+            let current_size = if full_path.exists() && full_path.is_file() {
+                fs::metadata(&full_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Get previous entry from pathmap
+            let previous_size = if let Some(entry) = self.pathmap.get(path) {
+                // For files/executables, try to get blob size from store
+                if matches!(entry.kind, EntryKind::File | EntryKind::ExecutableFile) {
+                    self.store.blob_size(&entry.blob_hash).unwrap_or(0)
+                } else {
+                    0 // Trees and symlinks don't count toward byte statistics
+                }
+            } else {
+                0 // New file, no previous size
+            };
+
+            // Calculate net change
+            if current_size > previous_size {
+                bytes_added += current_size - previous_size;
+            } else if previous_size > current_size {
+                bytes_removed += previous_size - current_size;
+            }
+        }
+
+        Ok((bytes_added, bytes_removed))
     }
 
     /// Graceful shutdown
