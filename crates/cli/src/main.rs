@@ -48,6 +48,14 @@ enum Commands {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Show detailed checkpoint information
+    Show {
+        /// Checkpoint ID or label
+        checkpoint: String,
+        /// Show diff with parent
+        #[arg(short = 'p', long)]
+        diff: bool,
+    },
     /// Show diff between checkpoints
     Diff {
         /// First checkpoint ID
@@ -266,6 +274,9 @@ async fn main() -> Result<()> {
         Commands::Status { remote } => cmd::status::run(remote).await,
         Commands::Info => cmd::info::run().await,
         Commands::Log { limit } => cmd::log::run(limit).await,
+        Commands::Show { checkpoint, diff } => {
+            cmd::show::run(&checkpoint, diff).await
+        }
         Commands::Diff { checkpoint_a, checkpoint_b, patch, context, max_files } => {
             cmd::diff::run(&checkpoint_a, &checkpoint_b, patch, context, max_files).await
         }
